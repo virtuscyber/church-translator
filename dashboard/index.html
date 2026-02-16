@@ -51,10 +51,7 @@
             gap: 16px;
         }
 
-        .logo {
-            font-size: 32px;
-            line-height: 1;
-        }
+        .logo { font-size: 32px; line-height: 1; }
 
         .header h1 {
             font-size: 22px;
@@ -67,6 +64,33 @@
             font-weight: 400;
             font-size: 15px;
             display: block;
+        }
+
+        .header-right {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+        }
+
+        .settings-btn {
+            background: none;
+            border: 1px solid var(--border);
+            border-radius: 50%;
+            width: 40px;
+            height: 40px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            cursor: pointer;
+            font-size: 20px;
+            transition: all 0.2s;
+            color: var(--text-dim);
+        }
+
+        .settings-btn:hover {
+            background: var(--surface-2);
+            border-color: var(--accent);
+            color: var(--text);
         }
 
         /* ── Status Badge ───────────────────────── */
@@ -82,34 +106,12 @@
             letter-spacing: 0.5px;
         }
 
-        .status-badge.stopped {
-            background: var(--surface-2);
-            color: var(--text-dim);
-            border: 1px solid var(--border);
-        }
+        .status-badge.stopped { background: var(--surface-2); color: var(--text-dim); border: 1px solid var(--border); }
+        .status-badge.running { background: var(--green-glow); color: var(--green); border: 1px solid rgba(74, 222, 128, 0.3); }
+        .status-badge.error { background: rgba(248, 113, 113, 0.15); color: var(--red); border: 1px solid rgba(248, 113, 113, 0.3); }
 
-        .status-badge.running {
-            background: var(--green-glow);
-            color: var(--green);
-            border: 1px solid rgba(74, 222, 128, 0.3);
-        }
-
-        .status-badge.error {
-            background: rgba(248, 113, 113, 0.15);
-            color: var(--red);
-            border: 1px solid rgba(248, 113, 113, 0.3);
-        }
-
-        .status-dot {
-            width: 8px;
-            height: 8px;
-            border-radius: 50%;
-            background: currentColor;
-        }
-
-        .status-badge.running .status-dot {
-            animation: pulse 1.5s ease-in-out infinite;
-        }
+        .status-dot { width: 8px; height: 8px; border-radius: 50%; background: currentColor; }
+        .status-badge.running .status-dot { animation: pulse 1.5s ease-in-out infinite; }
 
         @keyframes pulse {
             0%, 100% { opacity: 1; transform: scale(1); }
@@ -124,6 +126,68 @@
             display: grid;
             gap: 24px;
         }
+
+        /* ── Card base ──────────────────────────── */
+        .card {
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: var(--radius);
+            padding: 24px;
+        }
+
+        .card h2 {
+            font-size: 16px;
+            font-weight: 600;
+            margin-bottom: 16px;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        /* ── Form Elements ──────────────────────── */
+        .form-row {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 16px;
+            margin-bottom: 16px;
+        }
+
+        .form-group { display: flex; flex-direction: column; gap: 6px; }
+
+        .form-group label {
+            font-size: 13px;
+            font-weight: 600;
+            color: var(--text-dim);
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+
+        .form-group select,
+        .form-group input,
+        .form-group textarea {
+            background: var(--bg);
+            border: 1px solid var(--border);
+            border-radius: var(--radius-sm);
+            padding: 10px 14px;
+            color: var(--text);
+            font-size: 14px;
+            outline: none;
+            transition: border-color 0.2s;
+            font-family: inherit;
+        }
+
+        .form-group select:focus,
+        .form-group input:focus,
+        .form-group textarea:focus {
+            border-color: var(--accent);
+        }
+
+        .form-group textarea {
+            resize: vertical;
+            min-height: 60px;
+        }
+
+        .form-group select { cursor: pointer; }
 
         /* ── Stats Cards ────────────────────────── */
         .stats-row {
@@ -155,34 +219,13 @@
             color: var(--accent);
         }
 
-        .stat-card .unit {
-            font-size: 14px;
-            color: var(--text-dim);
-            font-weight: 400;
-        }
+        .stat-card .unit { font-size: 14px; color: var(--text-dim); font-weight: 400; }
 
         /* ── Controls ───────────────────────────── */
-        .controls {
-            background: var(--surface);
-            border: 1px solid var(--border);
-            border-radius: var(--radius);
-            padding: 24px;
-        }
+        .controls { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 24px; }
+        .controls h2 { font-size: 16px; font-weight: 600; margin-bottom: 16px; display: flex; align-items: center; gap: 8px; }
 
-        .controls h2 {
-            font-size: 16px;
-            font-weight: 600;
-            margin-bottom: 16px;
-            display: flex;
-            align-items: center;
-            gap: 8px;
-        }
-
-        .file-input-group {
-            display: flex;
-            gap: 12px;
-            align-items: stretch;
-        }
+        .file-input-group { display: flex; gap: 12px; align-items: stretch; }
 
         .file-input-group input {
             flex: 1;
@@ -196,13 +239,8 @@
             transition: border-color 0.2s;
         }
 
-        .file-input-group input:focus {
-            border-color: var(--accent);
-        }
-
-        .file-input-group input::placeholder {
-            color: var(--text-dim);
-        }
+        .file-input-group input:focus { border-color: var(--accent); }
+        .file-input-group input::placeholder { color: var(--text-dim); }
 
         .btn {
             display: inline-flex;
@@ -218,48 +256,37 @@
             white-space: nowrap;
         }
 
-        .btn-primary {
-            background: var(--accent);
-            color: white;
-        }
+        .btn-primary { background: var(--accent); color: white; }
+        .btn-primary:hover { background: #3d8de5; transform: translateY(-1px); }
+        .btn-primary:disabled { opacity: 0.5; cursor: not-allowed; transform: none; }
 
-        .btn-primary:hover {
-            background: #3d8de5;
-            transform: translateY(-1px);
-        }
+        .btn-sm { padding: 8px 16px; font-size: 13px; }
 
-        .btn-primary:disabled {
-            opacity: 0.5;
-            cursor: not-allowed;
-            transform: none;
+        .btn-secondary {
+            background: var(--surface-2);
+            color: var(--text);
+            border: 1px solid var(--border);
         }
+        .btn-secondary:hover { background: var(--border); }
 
         .btn-danger {
             background: rgba(248, 113, 113, 0.15);
             color: var(--red);
             border: 1px solid rgba(248, 113, 113, 0.3);
         }
+        .btn-danger:hover { background: rgba(248, 113, 113, 0.25); }
 
-        .btn-danger:hover {
-            background: rgba(248, 113, 113, 0.25);
+        .btn-success {
+            background: var(--green-glow);
+            color: var(--green);
+            border: 1px solid rgba(74, 222, 128, 0.3);
         }
 
         /* ── Progress Bar ───────────────────────── */
-        .progress-container {
-            margin-top: 16px;
-            display: none;
-        }
+        .progress-container { margin-top: 16px; display: none; }
+        .progress-container.active { display: block; }
 
-        .progress-container.active {
-            display: block;
-        }
-
-        .progress-bar-bg {
-            height: 6px;
-            background: var(--bg);
-            border-radius: 3px;
-            overflow: hidden;
-        }
+        .progress-bar-bg { height: 6px; background: var(--bg); border-radius: 3px; overflow: hidden; }
 
         .progress-bar-fill {
             height: 100%;
@@ -278,12 +305,7 @@
         }
 
         /* ── Transcript ─────────────────────────── */
-        .transcript-section {
-            background: var(--surface);
-            border: 1px solid var(--border);
-            border-radius: var(--radius);
-            overflow: hidden;
-        }
+        .transcript-section { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); overflow: hidden; }
 
         .transcript-header {
             padding: 20px 24px;
@@ -293,48 +315,17 @@
             justify-content: space-between;
         }
 
-        .transcript-header h2 {
-            font-size: 16px;
-            font-weight: 600;
-            display: flex;
-            align-items: center;
-            gap: 8px;
-        }
+        .transcript-header h2 { font-size: 16px; font-weight: 600; display: flex; align-items: center; gap: 8px; }
 
-        .transcript-count {
-            background: var(--surface-2);
-            padding: 4px 12px;
-            border-radius: 100px;
-            font-size: 13px;
-            color: var(--text-dim);
-        }
+        .transcript-count { background: var(--surface-2); padding: 4px 12px; border-radius: 100px; font-size: 13px; color: var(--text-dim); }
 
-        .transcript-body {
-            max-height: 500px;
-            overflow-y: auto;
-            scroll-behavior: smooth;
-        }
+        .transcript-body { max-height: 500px; overflow-y: auto; scroll-behavior: smooth; }
 
-        .transcript-empty {
-            padding: 60px 24px;
-            text-align: center;
-            color: var(--text-dim);
-        }
+        .transcript-empty { padding: 60px 24px; text-align: center; color: var(--text-dim); }
+        .transcript-empty .icon { font-size: 48px; margin-bottom: 12px; }
 
-        .transcript-empty .icon {
-            font-size: 48px;
-            margin-bottom: 12px;
-        }
-
-        .transcript-entry {
-            padding: 16px 24px;
-            border-bottom: 1px solid var(--border);
-            animation: slideIn 0.3s ease;
-        }
-
-        .transcript-entry:last-child {
-            border-bottom: none;
-        }
+        .transcript-entry { padding: 16px 24px; border-bottom: 1px solid var(--border); animation: slideIn 0.3s ease; }
+        .transcript-entry:last-child { border-bottom: none; }
 
         @keyframes slideIn {
             from { opacity: 0; transform: translateY(8px); }
@@ -350,24 +341,10 @@
             color: var(--text-dim);
         }
 
-        .transcript-entry .seq {
-            background: var(--surface-2);
-            padding: 2px 8px;
-            border-radius: 6px;
-            font-weight: 600;
-            font-size: 11px;
-        }
+        .transcript-entry .seq { background: var(--surface-2); padding: 2px 8px; border-radius: 6px; font-weight: 600; font-size: 11px; }
+        .transcript-entry .latency { color: var(--green); }
 
-        .transcript-entry .latency {
-            color: var(--green);
-        }
-
-        .lang-row {
-            display: flex;
-            align-items: flex-start;
-            gap: 12px;
-            margin-bottom: 6px;
-        }
+        .lang-row { display: flex; align-items: flex-start; gap: 12px; margin-bottom: 6px; }
 
         .lang-flag {
             flex-shrink: 0;
@@ -380,33 +357,13 @@
             font-size: 11px;
             font-weight: 700;
             margin-top: 3px;
-        }
-
-        .flag-uk {
-            background: linear-gradient(180deg, var(--uk-flag) 50%, var(--uk-yellow) 50%);
-            color: white;
-        }
-
-        .flag-en {
-            background: linear-gradient(180deg, #c8102e 33%, white 33%, white 66%, #012169 66%);
-            color: white;
-        }
-
-        .lang-text {
-            flex: 1;
-            font-size: 15px;
-            line-height: 1.5;
-        }
-
-        .lang-text.ukrainian {
+            background: var(--surface-2);
             color: var(--text-dim);
-            font-style: italic;
         }
 
-        .lang-text.english {
-            color: var(--text);
-            font-weight: 500;
-        }
+        .lang-text { flex: 1; font-size: 15px; line-height: 1.5; }
+        .lang-text.source { color: var(--text-dim); font-style: italic; }
+        .lang-text.translated { color: var(--text); font-weight: 500; }
 
         /* ── Live Indicator ─────────────────────── */
         .live-indicator {
@@ -424,19 +381,11 @@
             letter-spacing: 1px;
         }
 
-        .live-indicator.active {
-            display: flex;
-        }
+        .live-indicator.active { display: flex; }
 
-        .live-dot {
-            width: 8px;
-            height: 8px;
-            border-radius: 50%;
-            background: var(--red);
-            animation: pulse 1s ease-in-out infinite;
-        }
+        .live-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--red); animation: pulse 1s ease-in-out infinite; }
 
-        /* ── Notification Toast ─────────────────── */
+        /* ── Toast ──────────────────────────────── */
         .toast {
             position: fixed;
             bottom: 24px;
@@ -454,30 +403,144 @@
             max-width: 400px;
         }
 
-        .toast.show {
-            transform: translateY(0);
-            opacity: 1;
-        }
+        .toast.show { transform: translateY(0); opacity: 1; }
 
         /* ── Scrollbar ──────────────────────────── */
         .transcript-body::-webkit-scrollbar { width: 6px; }
         .transcript-body::-webkit-scrollbar-track { background: transparent; }
-        .transcript-body::-webkit-scrollbar-thumb {
-            background: var(--border);
-            border-radius: 3px;
+        .transcript-body::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+
+        /* ── Connection dot ─────────────────────── */
+        .connection-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--red); transition: background 0.3s; }
+        .connection-dot.connected { background: var(--green); }
+
+        /* ── Setup Wizard Modal ─────────────────── */
+        .modal-overlay {
+            display: none;
+            position: fixed;
+            inset: 0;
+            background: rgba(0, 0, 0, 0.7);
+            z-index: 1000;
+            align-items: center;
+            justify-content: center;
+            padding: 24px;
         }
 
-        /* ── Connected indicator ────────────────── */
-        .connection-dot {
-            width: 8px;
-            height: 8px;
-            border-radius: 50%;
-            background: var(--red);
+        .modal-overlay.active { display: flex; }
+
+        .modal {
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: var(--radius);
+            width: 100%;
+            max-width: 560px;
+            max-height: 90vh;
+            overflow-y: auto;
+            box-shadow: 0 24px 64px rgba(0, 0, 0, 0.5);
+        }
+
+        .modal-header {
+            padding: 24px 28px 0;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+        }
+
+        .modal-header h2 { font-size: 20px; font-weight: 700; display: flex; align-items: center; gap: 10px; }
+
+        .modal-close {
+            background: none;
+            border: none;
+            color: var(--text-dim);
+            font-size: 24px;
+            cursor: pointer;
+            padding: 4px;
+            line-height: 1;
+        }
+        .modal-close:hover { color: var(--text); }
+
+        .modal-body { padding: 24px 28px; }
+
+        .wizard-step { display: none; }
+        .wizard-step.active { display: block; }
+
+        .step-indicator {
+            display: flex;
+            gap: 8px;
+            margin-bottom: 24px;
+        }
+
+        .step-dot {
+            flex: 1;
+            height: 4px;
+            border-radius: 2px;
+            background: var(--border);
             transition: background 0.3s;
         }
 
-        .connection-dot.connected {
-            background: var(--green);
+        .step-dot.active { background: var(--accent); }
+        .step-dot.done { background: var(--green); }
+
+        .step-title {
+            font-size: 16px;
+            font-weight: 600;
+            margin-bottom: 8px;
+        }
+
+        .step-desc {
+            font-size: 14px;
+            color: var(--text-dim);
+            margin-bottom: 20px;
+        }
+
+        .key-input-group {
+            display: flex;
+            gap: 10px;
+            margin-bottom: 12px;
+        }
+
+        .key-input-group input {
+            flex: 1;
+            background: var(--bg);
+            border: 1px solid var(--border);
+            border-radius: var(--radius-sm);
+            padding: 12px 16px;
+            color: var(--text);
+            font-size: 14px;
+            outline: none;
+            font-family: monospace;
+        }
+
+        .key-input-group input:focus { border-color: var(--accent); }
+
+        .test-result {
+            font-size: 13px;
+            margin-top: 8px;
+            min-height: 20px;
+        }
+
+        .test-result.success { color: var(--green); }
+        .test-result.error { color: var(--red); }
+        .test-result.loading { color: var(--amber); }
+
+        .optional-badge {
+            display: inline-block;
+            background: var(--surface-2);
+            color: var(--text-dim);
+            font-size: 11px;
+            padding: 2px 8px;
+            border-radius: 4px;
+            margin-left: 8px;
+            font-weight: 400;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+
+        .modal-footer {
+            padding: 0 28px 24px;
+            display: flex;
+            justify-content: space-between;
+            gap: 12px;
         }
 
         /* ── Responsive ─────────────────────────── */
@@ -487,6 +550,8 @@
             .stats-row { grid-template-columns: repeat(2, 1fr); }
             .file-input-group { flex-direction: column; }
             .stat-card .value { font-size: 28px; }
+            .form-row { grid-template-columns: 1fr; }
+            .modal { max-width: 100%; }
         }
     </style>
 </head>
@@ -498,10 +563,10 @@
         <div class="logo">⛪</div>
         <h1>
             Church Live Translation
-            <span>Ukrainian → English</span>
+            <span id="langPairLabel">Ukrainian → English</span>
         </h1>
     </div>
-    <div style="display: flex; align-items: center; gap: 12px;">
+    <div class="header-right">
         <div class="live-indicator" id="liveIndicator">
             <div class="live-dot"></div>
             TRANSLATING
@@ -510,12 +575,55 @@
             <div class="status-dot"></div>
             <span id="statusText">Ready</span>
         </div>
+        <button class="settings-btn" onclick="openWizard()" title="Settings">⚙️</button>
         <div class="connection-dot" id="connectionDot" title="WebSocket connection"></div>
     </div>
 </header>
 
 <!-- Main Content -->
 <main class="main">
+
+    <!-- Audio & Language Settings -->
+    <div class="card" id="settingsPanel">
+        <h2>🎛️ Audio & Language Settings</h2>
+
+        <!-- Audio Devices -->
+        <div class="form-row">
+            <div class="form-group">
+                <label>Microphone (Input)</label>
+                <select id="inputDevice"><option value="">Loading devices...</option></select>
+            </div>
+            <div class="form-group">
+                <label>Speaker (Output)</label>
+                <div style="display:flex;gap:8px;">
+                    <select id="outputDevice" style="flex:1;"><option value="">Loading devices...</option></select>
+                    <button class="btn btn-secondary btn-sm" onclick="testOutput()" title="Play test sound">🔊 Test</button>
+                </div>
+            </div>
+        </div>
+
+        <!-- Language Selection -->
+        <div class="form-row">
+            <div class="form-group">
+                <label>Source Language</label>
+                <select id="sourceLang"></select>
+            </div>
+            <div class="form-group">
+                <label>Target Language</label>
+                <select id="targetLang"></select>
+            </div>
+        </div>
+
+        <!-- Custom Vocabulary -->
+        <div class="form-group">
+            <label>Custom Vocabulary & Terms (church names, biblical terms, etc.)</label>
+            <textarea id="customVocab" placeholder="e.g., Bethel, Jehovah Jireh, Pastor Petro Ivanov..."></textarea>
+        </div>
+
+        <div style="display:flex;justify-content:flex-end;margin-top:12px;">
+            <button class="btn btn-primary btn-sm" onclick="saveSettings()">💾 Save Settings</button>
+        </div>
+    </div>
 
     <!-- Stats Row -->
     <div class="stats-row">
@@ -542,12 +650,8 @@
         <h2>🎛️ Test with Audio File</h2>
         <div class="file-input-group">
             <input type="text" id="fileInput" placeholder="Path to audio file (e.g. samples/sermon_clip.wav)" value="samples/sermon_clip.wav">
-            <button class="btn btn-primary" id="startBtn" onclick="startTest()">
-                ▶ Translate
-            </button>
-            <button class="btn btn-danger" id="stopBtn" onclick="stopTest()" style="display:none;">
-                ⏹ Stop
-            </button>
+            <button class="btn btn-primary" id="startBtn" onclick="startTest()">▶ Translate</button>
+            <button class="btn btn-danger" id="stopBtn" onclick="stopTest()" style="display:none;">⏹ Stop</button>
         </div>
         <div class="progress-container" id="progressContainer">
             <div class="progress-bar-bg">
@@ -580,18 +684,356 @@
 <!-- Toast -->
 <div class="toast" id="toast"></div>
 
+<!-- ── Setup Wizard Modal ──────────────────────────────────── -->
+<div class="modal-overlay" id="wizardOverlay">
+    <div class="modal">
+        <div class="modal-header">
+            <h2>⛪ Setup Wizard</h2>
+            <button class="modal-close" onclick="closeWizard()" id="wizardCloseBtn">&times;</button>
+        </div>
+        <div class="modal-body">
+            <div class="step-indicator">
+                <div class="step-dot active" id="stepDot1"></div>
+                <div class="step-dot" id="stepDot2"></div>
+                <div class="step-dot" id="stepDot3"></div>
+            </div>
+
+            <!-- Step 1: OpenAI Key -->
+            <div class="wizard-step active" id="wizStep1">
+                <div class="step-title">Step 1: OpenAI API Key</div>
+                <div class="step-desc">Required for speech recognition and translation. Your key is stored locally and never shared.</div>
+                <div class="key-input-group">
+                    <input type="password" id="wizOpenaiKey" placeholder="sk-..." autocomplete="off">
+                    <button class="btn btn-secondary btn-sm" onclick="testOpenAI()">Test</button>
+                </div>
+                <div class="test-result" id="openaiResult"></div>
+            </div>
+
+            <!-- Step 2: ElevenLabs Key -->
+            <div class="wizard-step" id="wizStep2">
+                <div class="step-title">Step 2: ElevenLabs API Key <span class="optional-badge">Optional</span></div>
+                <div class="step-desc">For high-quality voice output. If skipped, OpenAI text-to-speech will be used instead.</div>
+                <div class="key-input-group">
+                    <input type="password" id="wizElevenlabsKey" placeholder="Enter ElevenLabs key..." autocomplete="off">
+                    <button class="btn btn-secondary btn-sm" onclick="testElevenLabs()">Test</button>
+                </div>
+                <div class="test-result" id="elevenlabsResult"></div>
+            </div>
+
+            <!-- Step 3: Language Defaults -->
+            <div class="wizard-step" id="wizStep3">
+                <div class="step-title">Step 3: Default Languages</div>
+                <div class="step-desc">Choose the languages for your services. You can change these anytime.</div>
+                <div class="form-row">
+                    <div class="form-group">
+                        <label>Source Language</label>
+                        <select id="wizSourceLang"></select>
+                    </div>
+                    <div class="form-group">
+                        <label>Target Language</label>
+                        <select id="wizTargetLang"></select>
+                    </div>
+                </div>
+            </div>
+        </div>
+        <div class="modal-footer">
+            <button class="btn btn-secondary" id="wizBackBtn" onclick="wizardBack()" style="visibility:hidden;">← Back</button>
+            <button class="btn btn-primary" id="wizNextBtn" onclick="wizardNext()">Next →</button>
+        </div>
+    </div>
+</div>
+
 <script>
+    // ── State ─────────────────────────────────────
     let ws = null;
     let reconnectTimer = null;
+    let wizardStep = 1;
+    let languages = [];
+
+    const LANG_LIST = [
+        {code:"uk",name:"Ukrainian"},{code:"ru",name:"Russian"},{code:"es",name:"Spanish"},
+        {code:"pt",name:"Portuguese"},{code:"fr",name:"French"},{code:"de",name:"German"},
+        {code:"ko",name:"Korean"},{code:"zh",name:"Mandarin Chinese"},{code:"ar",name:"Arabic"},
+        {code:"pl",name:"Polish"},{code:"ro",name:"Romanian"},{code:"it",name:"Italian"},
+        {code:"ja",name:"Japanese"},{code:"hi",name:"Hindi"},{code:"en",name:"English"},
+    ];
+
+    // ── Init ──────────────────────────────────────
+    connectWS();
+    loadDevices();
+    loadConfig();
+    populateLanguageDropdowns();
+    checkSetupStatus();
+
+    function populateLanguageDropdowns() {
+        const sourceExclude = ['en'];  // English typically not a source for church translation
+        const selectors = [
+            {el: document.getElementById('sourceLang'), exclude: []},
+            {el: document.getElementById('targetLang'), exclude: []},
+            {el: document.getElementById('wizSourceLang'), exclude: []},
+            {el: document.getElementById('wizTargetLang'), exclude: []},
+        ];
+        selectors.forEach(({el, exclude}) => {
+            el.innerHTML = '';
+            LANG_LIST.forEach(l => {
+                if (!exclude.includes(l.code)) {
+                    const opt = document.createElement('option');
+                    opt.value = l.code;
+                    opt.textContent = l.name;
+                    el.appendChild(opt);
+                }
+            });
+        });
+        // Defaults
+        document.getElementById('sourceLang').value = 'uk';
+        document.getElementById('targetLang').value = 'en';
+        document.getElementById('wizSourceLang').value = 'uk';
+        document.getElementById('wizTargetLang').value = 'en';
+    }
+
+    async function loadDevices() {
+        try {
+            const res = await fetch('/api/devices');
+            const data = await res.json();
+            populateDeviceSelect('inputDevice', data.input || []);
+            populateDeviceSelect('outputDevice', data.output || []);
+        } catch (e) {
+            console.error('Failed to load devices:', e);
+            document.getElementById('inputDevice').innerHTML = '<option value="">No devices available</option>';
+            document.getElementById('outputDevice').innerHTML = '<option value="">No devices available</option>';
+        }
+    }
+
+    function populateDeviceSelect(id, devices) {
+        const sel = document.getElementById(id);
+        sel.innerHTML = '<option value="">System Default</option>';
+        devices.forEach(d => {
+            const opt = document.createElement('option');
+            opt.value = d.index;
+            opt.textContent = d.name;
+            sel.appendChild(opt);
+        });
+    }
+
+    async function loadConfig() {
+        try {
+            const res = await fetch('/api/config');
+            const cfg = await res.json();
+            if (cfg.input_device !== undefined && cfg.input_device !== null) {
+                document.getElementById('inputDevice').value = cfg.input_device;
+            }
+            if (cfg.output_device !== undefined && cfg.output_device !== null) {
+                document.getElementById('outputDevice').value = cfg.output_device;
+            }
+            if (cfg.source_language) {
+                document.getElementById('sourceLang').value = cfg.source_language;
+                document.getElementById('wizSourceLang').value = cfg.source_language;
+            }
+            if (cfg.target_language) {
+                document.getElementById('targetLang').value = cfg.target_language;
+                document.getElementById('wizTargetLang').value = cfg.target_language;
+            }
+            if (cfg.custom_vocabulary) {
+                document.getElementById('customVocab').value = cfg.custom_vocabulary;
+            }
+            updateLangPairLabel();
+        } catch (e) {
+            console.error('Failed to load config:', e);
+        }
+    }
+
+    function updateLangPairLabel() {
+        const src = document.getElementById('sourceLang');
+        const tgt = document.getElementById('targetLang');
+        const srcName = src.options[src.selectedIndex]?.text || 'Source';
+        const tgtName = tgt.options[tgt.selectedIndex]?.text || 'Target';
+        document.getElementById('langPairLabel').textContent = `${srcName} → ${tgtName}`;
+    }
+
+    document.getElementById('sourceLang').addEventListener('change', updateLangPairLabel);
+    document.getElementById('targetLang').addEventListener('change', updateLangPairLabel);
+
+    async function saveSettings() {
+        const data = {
+            input_device: document.getElementById('inputDevice').value || null,
+            output_device: document.getElementById('outputDevice').value || null,
+            source_language: document.getElementById('sourceLang').value,
+            target_language: document.getElementById('targetLang').value,
+            custom_vocabulary: document.getElementById('customVocab').value,
+        };
+        try {
+            await fetch('/api/config', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify(data),
+            });
+            updateLangPairLabel();
+            showToast('✅ Settings saved!');
+        } catch (e) {
+            showToast('❌ Failed to save settings');
+        }
+    }
+
+    async function testOutput() {
+        const deviceIndex = document.getElementById('outputDevice').value;
+        try {
+            const res = await fetch('/api/test-output', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({device_index: deviceIndex || null}),
+            });
+            const data = await res.json();
+            if (data.ok) {
+                showToast('🔊 Test tone played!');
+            } else {
+                showToast('❌ ' + (data.error || 'Failed to play test tone'));
+            }
+        } catch (e) {
+            showToast('❌ Failed to play test tone');
+        }
+    }
+
+    // ── Setup Wizard ──────────────────────────────
+    async function checkSetupStatus() {
+        try {
+            const res = await fetch('/api/setup/status');
+            const data = await res.json();
+            if (!data.configured) {
+                openWizard(true);
+            }
+        } catch (e) {
+            console.error('Failed to check setup status:', e);
+        }
+    }
+
+    function openWizard(firstRun) {
+        document.getElementById('wizardOverlay').classList.add('active');
+        // Hide close button on first run
+        document.getElementById('wizardCloseBtn').style.display = firstRun ? 'none' : 'block';
+        setWizardStep(1);
+    }
+
+    function closeWizard() {
+        document.getElementById('wizardOverlay').classList.remove('active');
+    }
+
+    function setWizardStep(step) {
+        wizardStep = step;
+        for (let i = 1; i <= 3; i++) {
+            document.getElementById('wizStep' + i).classList.toggle('active', i === step);
+            const dot = document.getElementById('stepDot' + i);
+            dot.className = 'step-dot';
+            if (i < step) dot.classList.add('done');
+            if (i === step) dot.classList.add('active');
+        }
+        document.getElementById('wizBackBtn').style.visibility = step === 1 ? 'hidden' : 'visible';
+        const nextBtn = document.getElementById('wizNextBtn');
+        if (step === 3) {
+            nextBtn.textContent = '✓ Save & Start';
+            nextBtn.className = 'btn btn-success';
+        } else {
+            nextBtn.textContent = 'Next →';
+            nextBtn.className = 'btn btn-primary';
+        }
+    }
+
+    function wizardNext() {
+        if (wizardStep < 3) {
+            setWizardStep(wizardStep + 1);
+        } else {
+            saveWizard();
+        }
+    }
+
+    function wizardBack() {
+        if (wizardStep > 1) setWizardStep(wizardStep - 1);
+    }
+
+    async function testOpenAI() {
+        const key = document.getElementById('wizOpenaiKey').value.trim();
+        const el = document.getElementById('openaiResult');
+        if (!key) { el.textContent = 'Please enter a key'; el.className = 'test-result error'; return; }
+        el.textContent = 'Testing...'; el.className = 'test-result loading';
+        try {
+            const res = await fetch('/api/setup/test-openai', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({api_key: key}),
+            });
+            const data = await res.json();
+            if (data.ok) {
+                el.textContent = '✅ Connection successful!'; el.className = 'test-result success';
+            } else {
+                el.textContent = '❌ ' + (data.error || 'Invalid key'); el.className = 'test-result error';
+            }
+        } catch (e) {
+            el.textContent = '❌ Connection failed'; el.className = 'test-result error';
+        }
+    }
+
+    async function testElevenLabs() {
+        const key = document.getElementById('wizElevenlabsKey').value.trim();
+        const el = document.getElementById('elevenlabsResult');
+        if (!key) { el.textContent = 'Please enter a key'; el.className = 'test-result error'; return; }
+        el.textContent = 'Testing...'; el.className = 'test-result loading';
+        try {
+            const res = await fetch('/api/setup/test-elevenlabs', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({api_key: key}),
+            });
+            const data = await res.json();
+            if (data.ok) {
+                el.textContent = '✅ Connection successful!'; el.className = 'test-result success';
+            } else {
+                el.textContent = '❌ ' + (data.error || 'Invalid key'); el.className = 'test-result error';
+            }
+        } catch (e) {
+            el.textContent = '❌ Connection failed'; el.className = 'test-result error';
+        }
+    }
+
+    async function saveWizard() {
+        const data = {
+            openai_api_key: document.getElementById('wizOpenaiKey').value.trim(),
+            elevenlabs_api_key: document.getElementById('wizElevenlabsKey').value.trim(),
+            source_language: document.getElementById('wizSourceLang').value,
+            target_language: document.getElementById('wizTargetLang').value,
+        };
+        if (!data.openai_api_key) {
+            showToast('⚠️ OpenAI API key is required');
+            setWizardStep(1);
+            return;
+        }
+        try {
+            const res = await fetch('/api/setup/save', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify(data),
+            });
+            const result = await res.json();
+            if (result.ok) {
+                // Sync main UI
+                document.getElementById('sourceLang').value = data.source_language;
+                document.getElementById('targetLang').value = data.target_language;
+                updateLangPairLabel();
+                closeWizard();
+                showToast('✅ Setup complete! You\'re ready to translate.');
+            } else {
+                showToast('❌ Failed to save settings');
+            }
+        } catch (e) {
+            showToast('❌ Failed to save settings');
+        }
+    }
 
     // ── WebSocket ─────────────────────────────────
     function connectWS() {
         const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
         ws = new WebSocket(`${protocol}//${location.host}/ws`);
-        
+
         ws.onopen = () => {
             document.getElementById('connectionDot').classList.add('connected');
-            console.log('WebSocket connected');
         };
 
         ws.onclose = () => {
@@ -599,49 +1041,34 @@
             reconnectTimer = setTimeout(connectWS, 2000);
         };
 
-        ws.onmessage = (event) => {
-            const msg = JSON.parse(event.data);
-            handleMessage(msg);
-        };
-
-        ws.onerror = () => {
-            document.getElementById('connectionDot').classList.remove('connected');
-        };
+        ws.onmessage = (event) => handleMessage(JSON.parse(event.data));
+        ws.onerror = () => document.getElementById('connectionDot').classList.remove('connected');
     }
 
     function handleMessage(msg) {
         switch (msg.type) {
             case 'init':
                 updateStatus(msg.status);
-                if (msg.transcript && msg.transcript.length > 0) {
-                    msg.transcript.forEach(entry => addTranscriptEntry(entry));
-                }
+                if (msg.transcript?.length > 0) msg.transcript.forEach(e => addTranscriptEntry(e));
                 break;
-
             case 'status':
                 updateStatus(msg.status);
                 if (msg.stats) updateStats(msg.stats);
-                if (msg.status === 'completed') {
-                    showToast('✅ Translation complete!');
-                }
+                if (msg.status === 'completed') showToast('✅ Translation complete!');
                 break;
-
             case 'stt':
-                document.getElementById('statStatus').textContent = `🇺🇦 Listening... (${msg.seq}/${msg.total})`;
-                document.getElementById('statStatus').style.color = 'var(--uk-flag)';
+                document.getElementById('statStatus').textContent = `🎙️ Listening... (${msg.seq}/${msg.total})`;
+                document.getElementById('statStatus').style.color = 'var(--accent)';
                 break;
-
             case 'translation':
                 addTranscriptEntry(msg.entry);
                 updateProgress(msg.progress);
                 if (msg.stats) updateStats(msg.stats);
                 break;
-
             case 'error':
                 updateStatus('error');
                 showToast('❌ ' + msg.message);
                 break;
-
             case 'info':
                 showToast('ℹ️ ' + msg.message);
                 break;
@@ -649,7 +1076,6 @@
     }
 
     // ── UI Updates ────────────────────────────────
-
     function updateStatus(status) {
         const badge = document.getElementById('statusBadge');
         const text = document.getElementById('statusText');
@@ -663,72 +1089,55 @@
 
         switch (status) {
             case 'running':
-                text.textContent = 'Translating';
-                live.classList.add('active');
-                startBtn.style.display = 'none';
-                stopBtn.style.display = 'flex';
+                text.textContent = 'Translating'; live.classList.add('active');
+                startBtn.style.display = 'none'; stopBtn.style.display = 'flex';
                 progress.classList.add('active');
-                statStatus.textContent = 'Translating...';
-                statStatus.style.color = 'var(--green)';
+                statStatus.textContent = 'Translating...'; statStatus.style.color = 'var(--green)';
                 break;
             case 'stopped':
-                text.textContent = 'Ready';
-                live.classList.remove('active');
-                startBtn.style.display = 'flex';
-                stopBtn.style.display = 'none';
+                text.textContent = 'Ready'; live.classList.remove('active');
+                startBtn.style.display = 'flex'; stopBtn.style.display = 'none';
                 progress.classList.remove('active');
-                statStatus.textContent = 'Ready to start';
-                statStatus.style.color = 'var(--text-dim)';
+                statStatus.textContent = 'Ready to start'; statStatus.style.color = 'var(--text-dim)';
                 break;
             case 'completed':
-                text.textContent = 'Done';
-                live.classList.remove('active');
-                startBtn.style.display = 'flex';
-                stopBtn.style.display = 'none';
-                statStatus.textContent = '✅ Complete';
-                statStatus.style.color = 'var(--green)';
-                setTimeout(() => {
-                    progress.classList.remove('active');
-                    badge.className = 'status-badge stopped';
-                    text.textContent = 'Ready';
-                }, 3000);
+                text.textContent = 'Done'; live.classList.remove('active');
+                startBtn.style.display = 'flex'; stopBtn.style.display = 'none';
+                statStatus.textContent = '✅ Complete'; statStatus.style.color = 'var(--green)';
+                setTimeout(() => { progress.classList.remove('active'); badge.className = 'status-badge stopped'; text.textContent = 'Ready'; }, 3000);
                 break;
             case 'error':
-                text.textContent = 'Error';
-                live.classList.remove('active');
-                startBtn.style.display = 'flex';
-                stopBtn.style.display = 'none';
+                text.textContent = 'Error'; live.classList.remove('active');
+                startBtn.style.display = 'flex'; stopBtn.style.display = 'none';
                 progress.classList.remove('active');
-                statStatus.textContent = '❌ Error';
-                statStatus.style.color = 'var(--red)';
+                statStatus.textContent = '❌ Error'; statStatus.style.color = 'var(--red)';
                 break;
         }
     }
 
     function updateStats(stats) {
-        if (stats.chunks_processed !== undefined) {
-            document.getElementById('statChunks').textContent = stats.chunks_processed;
-        }
-        if (stats.avg_latency !== undefined) {
-            document.getElementById('statLatency').innerHTML = stats.avg_latency + '<span class="unit">s</span>';
-        }
-        if (stats.total_runtime !== undefined) {
-            document.getElementById('statRuntime').innerHTML = stats.total_runtime + '<span class="unit">s</span>';
-        }
+        if (stats.chunks_processed !== undefined) document.getElementById('statChunks').textContent = stats.chunks_processed;
+        if (stats.avg_latency !== undefined) document.getElementById('statLatency').innerHTML = stats.avg_latency + '<span class="unit">s</span>';
+        if (stats.total_runtime !== undefined) document.getElementById('statRuntime').innerHTML = stats.total_runtime + '<span class="unit">s</span>';
     }
 
     function updateProgress(pct) {
-        const fill = document.getElementById('progressFill');
-        const text = document.getElementById('progressPct');
         const percent = Math.round(pct * 100);
-        fill.style.width = percent + '%';
-        text.textContent = percent + '%';
+        document.getElementById('progressFill').style.width = percent + '%';
+        document.getElementById('progressPct').textContent = percent + '%';
     }
 
     function addTranscriptEntry(entry) {
         const body = document.getElementById('transcriptBody');
         const empty = document.getElementById('transcriptEmpty');
         if (empty) empty.remove();
+
+        const srcLang = entry.source_lang || 'uk';
+        const tgtLang = entry.target_lang || 'en';
+        const srcText = entry.source || entry.ukrainian || '';
+        const tgtText = entry.translated || entry.english || '';
+        const srcCode = srcLang.toUpperCase().substring(0, 2);
+        const tgtCode = tgtLang.toUpperCase().substring(0, 2);
 
         const div = document.createElement('div');
         div.className = 'transcript-entry';
@@ -738,12 +1147,12 @@
                 <span class="latency">⚡ ${entry.latency}s</span>
             </div>
             <div class="lang-row">
-                <div class="lang-flag flag-uk">UA</div>
-                <div class="lang-text ukrainian">${escapeHtml(entry.ukrainian)}</div>
+                <div class="lang-flag">${escapeHtml(srcCode)}</div>
+                <div class="lang-text source">${escapeHtml(srcText)}</div>
             </div>
             <div class="lang-row">
-                <div class="lang-flag flag-en">EN</div>
-                <div class="lang-text english">${escapeHtml(entry.english)}</div>
+                <div class="lang-flag">${escapeHtml(tgtCode)}</div>
+                <div class="lang-text translated">${escapeHtml(tgtText)}</div>
             </div>
         `;
 
@@ -768,15 +1177,10 @@
     }
 
     // ── Actions ───────────────────────────────────
-
     async function startTest() {
         const filePath = document.getElementById('fileInput').value.trim();
-        if (!filePath) {
-            showToast('⚠️ Please enter a file path');
-            return;
-        }
+        if (!filePath) { showToast('⚠️ Please enter a file path'); return; }
 
-        // Clear previous transcript
         const body = document.getElementById('transcriptBody');
         body.innerHTML = '';
         document.getElementById('transcriptCount').textContent = '0 segments';
@@ -784,31 +1188,25 @@
         document.getElementById('progressFill').style.width = '0%';
         document.getElementById('progressPct').textContent = '0%';
 
+        // Save settings before starting (ensure language config is applied)
+        await saveSettings();
+
         try {
             const res = await fetch('/api/test-file', {
                 method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ file_path: filePath }),
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({file_path: filePath}),
             });
             const data = await res.json();
-            if (data.error) {
-                showToast('❌ ' + data.error);
-            }
+            if (data.error) showToast('❌ ' + data.error);
         } catch (err) {
             showToast('❌ Failed to start: ' + err.message);
         }
     }
 
     async function stopTest() {
-        try {
-            await fetch('/api/stop', { method: 'POST' });
-        } catch (err) {
-            showToast('❌ Failed to stop: ' + err.message);
-        }
+        try { await fetch('/api/stop', {method: 'POST'}); } catch (err) { showToast('❌ Failed to stop: ' + err.message); }
     }
-
-    // ── Init ──────────────────────────────────────
-    connectWS();
 </script>
 
 </body>
