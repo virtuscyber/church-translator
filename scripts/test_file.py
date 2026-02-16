@@ -105,6 +105,74 @@ def pcm_to_wav(pcm_data: bytes, sample_rate: int = 24000, channels: int = 1, sam
     return buf.getvalue()
 
 
+async def run_test_streaming(input_file: str, output_file: str, use_vad: bool = True):
+    """Run the streaming (overlapped) pipeline on a file."""
+    config = load_config()
+
+    if not config.openai_api_key:
+        logger.error("OPENAI_API_KEY not set in .env")
+        sys.exit(1)
+
+    from src.streaming_pipeline import StreamingFileTest
+
+    # Chunk the file (always VAD for streaming)
+    if use_vad:
+        from src.vad_chunker import FileVADChunker
+        import subprocess, tempfile
+        logger.info("🎯 Using VAD-based smart chunking")
+        vad_chunker = FileVADChunker(
+            aggressiveness=config.pipeline.vad_aggressiveness,
+            min_chunk_sec=config.pipeline.min_chunk_sec,
+            max_chunk_sec=config.pipeline.max_chunk_sec,
+            silence_threshold_sec=config.pipeline.silence_threshold_sec,
+        )
+        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
+            tmp_path = tmp.name
+        subprocess.run(
+            ["ffmpeg", "-i", input_file, "-ar", "16000", "-ac", "1", "-sample_fmt", "s16", "-y", tmp_path],
+            capture_output=True, check=True,
+        )
+        chunks = vad_chunker.chunk_file(tmp_path)
+        Path(tmp_path).unlink(missing_ok=True)
+    else:
+        chunks = chunk_audio_file(input_file)
+
+    logger.info("🚀 STREAMING MODE — processing %d chunks with overlapped pipeline", len(chunks))
+
+    streamer = StreamingFileTest(config)
+    total_start = time.time()
+    results = await streamer.process_chunks(chunks)
+    total_time = time.time() - total_start
+
+    # Collect output
+    all_audio: list[bytes] = []
+    transcript_lines: list[str] = []
+    for c in results:
+        if c.audio_bytes:
+            all_audio.append(c.audio_bytes)
+        transcript_lines.append(f"[Chunk {c.seq}]")
+        transcript_lines.append(f"  UK: {c.ukrainian_text}")
+        transcript_lines.append(f"  EN: {c.english_text}")
+        transcript_lines.append("")
+
+    if all_audio:
+        combined_pcm = b"".join(all_audio)
+        wav_data = pcm_to_wav(combined_pcm, sample_rate=24000)
+        output_path = Path(output_file)
+        output_path.write_bytes(wav_data)
+        logger.info("✅ Output audio: %s (%.1f MB)", output_path, len(wav_data) / 1e6)
+
+    transcript_path = Path(output_file).with_suffix(".txt")
+    transcript_path.write_text("\n".join(transcript_lines), encoding="utf-8")
+    logger.info("📝 Transcript: %s", transcript_path)
+
+    logger.info("━━━ Summary (STREAMING) ━━━")
+    logger.info("  Input: %s", input_file)
+    logger.info("  Chunks processed: %d/%d", len(results), len(chunks))
+    logger.info("  Total time: %.1fs (with overlapped processing)", total_time)
+    logger.info("  Output: %s + %s", output_file, transcript_path)
+
+
 async def run_test(input_file: str, output_file: str, chunk_sec: float, use_vad: bool = False):
     config = load_config()
 
@@ -247,6 +315,8 @@ def main():
                         help="Chunk duration in seconds for fixed mode (default: 8.0)")
     parser.add_argument("--vad", action="store_true",
                         help="Use VAD-based smart chunking instead of fixed duration")
+    parser.add_argument("--streaming", action="store_true",
+                        help="Use streaming (overlapped) pipeline for faster processing")
     args = parser.parse_args()
 
     if not Path(args.input).exists():
@@ -255,7 +325,10 @@ def main():
 
     Path(args.output).parent.mkdir(parents=True, exist_ok=True)
 
-    asyncio.run(run_test(args.input, args.output, args.chunk_sec, use_vad=args.vad))
+    if args.streaming:
+        asyncio.run(run_test_streaming(args.input, args.output, use_vad=args.vad or True))
+    else:
+        asyncio.run(run_test(args.input, args.output, args.chunk_sec, use_vad=args.vad))
 
 
 if __name__ == "__main__":
