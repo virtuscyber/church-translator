@@ -1,0 +1,31 @@
+audio:
+  input_device: null          # null = system default; set to device name or index
+  output_device: null         # null = system default; set to device name or index
+  sample_rate: 48000          # Dante standard
+  channels: 1                 # Mono for speech
+  chunk_duration_sec: 8       # Seconds of audio per STT chunk
+
+transcription:
+  model: "gpt-4o-transcribe"
+  language: "uk"              # Ukrainian (ISO 639-1)
+
+translation:
+  model: "gpt-4o"
+  temperature: 0.3
+  prompt_file: "prompts/biblical_translator.txt"
+
+synthesis:
+  provider: "elevenlabs"      # "elevenlabs" or "openai"
+  elevenlabs:
+    model: "eleven_turbo_v2_5"
+    voice_id: "pNInz6obpgDQGcFmaJgB"   # Adam
+    stability: 0.7
+    similarity_boost: 0.8
+  openai:
+    model: "gpt-4o-mini-tts"
+    voice: "onyx"
+
+pipeline:
+  overlap_sec: 1.0            # Overlap between chunks for context
+  buffer_silence_sec: 2.0     # Flush buffer after this much silence
+  context_sentences: 2        # Previous sentences sent for translation continuity
