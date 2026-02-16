@@ -39,45 +39,57 @@ logger = logging.getLogger(__name__)
 def chunk_audio_file(file_path: str, chunk_sec: float = 8.0) -> list[bytes]:
     """Split an audio file into WAV chunks for the transcription API.
     
-    Uses pydub for format flexibility, falls back to wave for plain .wav files.
+    Uses ffmpeg to convert any format to mono 16kHz WAV, then splits with the wave module.
     Returns a list of WAV-formatted byte buffers.
     """
+    import subprocess
+    import tempfile
+
     path = Path(file_path)
     
+    # Convert to normalized WAV via ffmpeg (handles any input format)
+    with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
+        tmp_path = tmp.name
+    
     try:
-        from pydub import AudioSegment
-        audio = AudioSegment.from_file(str(path))
-        # Normalize to mono 16-bit 16kHz (good for STT)
-        audio = audio.set_channels(1).set_frame_rate(16000).set_sample_width(2)
-    except ImportError:
-        # Fallback: only works for .wav files
-        if path.suffix.lower() != ".wav":
-            logger.error("Install pydub + ffmpeg to handle non-WAV files: pip install pydub")
-            sys.exit(1)
-        with wave.open(str(path), "rb") as wf:
-            params = wf.getparams()
-            raw = wf.readframes(wf.getnframes())
-        # Wrap raw PCM into AudioSegment-like handling
-        from pydub import AudioSegment
-        audio = AudioSegment(
-            data=raw,
-            sample_width=params.sampwidth,
-            frame_rate=params.framerate,
-            channels=params.nchannels,
-        ).set_channels(1).set_frame_rate(16000).set_sample_width(2)
+        subprocess.run(
+            ["ffmpeg", "-i", str(path), "-ar", "16000", "-ac", "1", "-sample_fmt", "s16", "-y", tmp_path],
+            capture_output=True, check=True,
+        )
+    except subprocess.CalledProcessError as e:
+        logger.error("ffmpeg conversion failed: %s", e.stderr.decode())
+        sys.exit(1)
 
-    chunk_ms = int(chunk_sec * 1000)
+    # Read the normalized WAV
+    with wave.open(tmp_path, "rb") as wf:
+        sample_rate = wf.getframerate()
+        sample_width = wf.getsampwidth()
+        n_channels = wf.getnchannels()
+        total_frames = wf.getnframes()
+        raw_data = wf.readframes(total_frames)
+    
+    Path(tmp_path).unlink(missing_ok=True)
+
+    total_duration = total_frames / sample_rate
+    chunk_frames = int(chunk_sec * sample_rate)
+    frame_size = sample_width * n_channels
     chunks = []
-    
-    for start_ms in range(0, len(audio), chunk_ms):
-        segment = audio[start_ms : start_ms + chunk_ms]
+
+    for start in range(0, total_frames, chunk_frames):
+        end = min(start + chunk_frames, total_frames)
+        segment = raw_data[start * frame_size : end * frame_size]
+        
         buf = io.BytesIO()
-        segment.export(buf, format="wav")
+        with wave.open(buf, "wb") as out_wf:
+            out_wf.setnchannels(n_channels)
+            out_wf.setsampwidth(sample_width)
+            out_wf.setframerate(sample_rate)
+            out_wf.writeframes(segment)
         chunks.append(buf.getvalue())
-    
+
     logger.info(
         "Split %s into %d chunks of ~%.1fs each (total %.1fs)",
-        path.name, len(chunks), chunk_sec, len(audio) / 1000.0,
+        path.name, len(chunks), chunk_sec, total_duration,
     )
     return chunks
 
@@ -120,7 +132,7 @@ async def run_test(input_file: str, output_file: str, chunk_sec: float):
         elevenlabs_voice_id=config.synthesis.elevenlabs.voice_id,
         elevenlabs_model=config.synthesis.elevenlabs.model,
         elevenlabs_stability=config.synthesis.elevenlabs.stability,
-        elevenlabs_similarity=config.synthesis.elevenlabs.similarity,
+        elevenlabs_similarity=config.synthesis.elevenlabs.similarity_boost,
         openai_model=config.synthesis.openai.model,
         openai_voice=config.synthesis.openai.voice,
     )
