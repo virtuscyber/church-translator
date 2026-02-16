@@ -67,6 +67,12 @@ class PipelineConfig:
     overlap_sec: float = 1.0
     buffer_silence_sec: float = 2.0
     context_sentences: int = 2
+    # VAD settings (Phase 2)
+    use_vad: bool = True
+    vad_aggressiveness: int = 2  # 0-3, higher = more aggressive filtering
+    min_chunk_sec: float = 3.0   # Minimum speech segment duration
+    max_chunk_sec: float = 15.0  # Maximum before force-split
+    silence_threshold_sec: float = 0.8  # Silence duration to trigger split
 
 
 @dataclass

@@ -12,6 +12,7 @@ from .config import Config
 from .transcriber import Transcriber
 from .translator import Translator
 from .synthesizer import Synthesizer
+from .vad_capture import VADAudioCapture
 
 logger = logging.getLogger(__name__)
 
@@ -23,13 +24,28 @@ class TranslationPipeline:
         self.config = config
         self._running = False
 
-        # Initialize components
-        self.capture = AudioCapture(
-            device=config.audio.input_device,
-            sample_rate=config.audio.sample_rate,
-            channels=config.audio.channels,
-            chunk_duration_sec=config.audio.chunk_duration_sec,
-        )
+        # Initialize capture — use VAD-based chunking if enabled
+        use_vad = getattr(config.pipeline, 'use_vad', True)
+        
+        if use_vad:
+            self.capture = VADAudioCapture(
+                device=config.audio.input_device,
+                sample_rate=config.audio.sample_rate,
+                channels=config.audio.channels,
+                vad_aggressiveness=getattr(config.pipeline, 'vad_aggressiveness', 2),
+                min_chunk_sec=getattr(config.pipeline, 'min_chunk_sec', 3.0),
+                max_chunk_sec=getattr(config.pipeline, 'max_chunk_sec', 15.0),
+                silence_threshold_sec=getattr(config.pipeline, 'silence_threshold_sec', 0.8),
+            )
+            logger.info("Using VAD-based smart chunking")
+        else:
+            self.capture = AudioCapture(
+                device=config.audio.input_device,
+                sample_rate=config.audio.sample_rate,
+                channels=config.audio.channels,
+                chunk_duration_sec=config.audio.chunk_duration_sec,
+            )
+            logger.info("Using fixed-duration chunking (%.1fs)", config.audio.chunk_duration_sec)
 
         self.transcriber = Transcriber(
             api_key=config.openai_api_key,

@@ -105,7 +105,7 @@ def pcm_to_wav(pcm_data: bytes, sample_rate: int = 24000, channels: int = 1, sam
     return buf.getvalue()
 
 
-async def run_test(input_file: str, output_file: str, chunk_sec: float):
+async def run_test(input_file: str, output_file: str, chunk_sec: float, use_vad: bool = False):
     config = load_config()
 
     if not config.openai_api_key:
@@ -138,7 +138,28 @@ async def run_test(input_file: str, output_file: str, chunk_sec: float):
     )
 
     # Chunk the file
-    chunks = chunk_audio_file(input_file, chunk_sec)
+    if use_vad:
+        from src.vad_chunker import FileVADChunker
+        logger.info("🎯 Using VAD-based smart chunking (speech boundary detection)")
+        vad_chunker = FileVADChunker(
+            aggressiveness=config.pipeline.vad_aggressiveness,
+            min_chunk_sec=config.pipeline.min_chunk_sec,
+            max_chunk_sec=config.pipeline.max_chunk_sec,
+            silence_threshold_sec=config.pipeline.silence_threshold_sec,
+        )
+        # Need a normalized WAV for VAD — convert via ffmpeg first
+        import subprocess, tempfile
+        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
+            tmp_path = tmp.name
+        subprocess.run(
+            ["ffmpeg", "-i", input_file, "-ar", "16000", "-ac", "1", "-sample_fmt", "s16", "-y", tmp_path],
+            capture_output=True, check=True,
+        )
+        chunks = vad_chunker.chunk_file(tmp_path)
+        Path(tmp_path).unlink(missing_ok=True)
+    else:
+        logger.info("📏 Using fixed-duration chunking (%.1fs)", chunk_sec)
+        chunks = chunk_audio_file(input_file, chunk_sec)
 
     all_audio: list[bytes] = []
     transcript_lines: list[str] = []
@@ -223,7 +244,9 @@ def main():
     parser.add_argument("--output", "-o", default="output/test_translation.wav",
                         help="Output audio path (default: output/test_translation.wav)")
     parser.add_argument("--chunk-sec", "-c", type=float, default=8.0,
-                        help="Chunk duration in seconds (default: 8.0)")
+                        help="Chunk duration in seconds for fixed mode (default: 8.0)")
+    parser.add_argument("--vad", action="store_true",
+                        help="Use VAD-based smart chunking instead of fixed duration")
     args = parser.parse_args()
 
     if not Path(args.input).exists():
@@ -232,7 +255,7 @@ def main():
 
     Path(args.output).parent.mkdir(parents=True, exist_ok=True)
 
-    asyncio.run(run_test(args.input, args.output, args.chunk_sec))
+    asyncio.run(run_test(args.input, args.output, args.chunk_sec, use_vad=args.vad))
 
 
 if __name__ == "__main__":
