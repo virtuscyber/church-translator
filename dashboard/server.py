@@ -23,6 +23,30 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 logger = logging.getLogger(__name__)
 
+# ── Auth & CORS Middleware ──────────────────────────────────────
+
+DASHBOARD_API_KEY = os.getenv("DASHBOARD_API_KEY", "")
+CORS_ORIGIN = os.getenv("DASHBOARD_CORS_ORIGIN", "")
+
+# Paths that don't require auth (static assets, websocket handled separately)
+_PUBLIC_PATHS = {"/", "/ws"}
+
+
+@web.middleware
+async def auth_middleware(request: web.Request, handler):
+    """Require Bearer token for API routes when DASHBOARD_API_KEY is set."""
+    if DASHBOARD_API_KEY and request.path not in _PUBLIC_PATHS:
+        auth = request.headers.get("Authorization", "")
+        if auth != f"Bearer {DASHBOARD_API_KEY}":
+            return web.json_response({"error": "Unauthorized"}, status=401)
+    response = await handler(request)
+    # CORS headers
+    origin = CORS_ORIGIN or "http://localhost:8080"
+    response.headers["Access-Control-Allow-Origin"] = origin
+    response.headers["Access-Control-Allow-Headers"] = "Authorization, Content-Type"
+    response.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
+    return response
+
 # Global state
 class AppState:
     """Shared state between dashboard and pipeline."""
@@ -130,7 +154,6 @@ async def _run_file_test(file_path: str):
         from src.config import load_config
         from src.transcriber import Transcriber
         from src.translator import Translator
-        from src.synthesizer import Synthesizer
         from src.vad_chunker import FileVADChunker
         import subprocess
         import tempfile
@@ -151,18 +174,6 @@ async def _run_file_test(file_path: str):
             temperature=config.translation.temperature,
             context_sentences=config.pipeline.context_sentences,
         )
-        synthesizer = Synthesizer(
-            provider=config.synthesis.provider,
-            openai_api_key=config.openai_api_key,
-            elevenlabs_api_key=config.elevenlabs_api_key,
-            elevenlabs_voice_id=config.synthesis.elevenlabs.voice_id,
-            elevenlabs_model=config.synthesis.elevenlabs.model,
-            elevenlabs_stability=config.synthesis.elevenlabs.stability,
-            elevenlabs_similarity=config.synthesis.elevenlabs.similarity_boost,
-            openai_model=config.synthesis.openai.model,
-            openai_voice=config.synthesis.openai.voice,
-        )
-
         # Convert and chunk
         with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
             tmp_path = tmp.name
@@ -207,8 +218,8 @@ async def _run_file_test(file_path: str):
             if not en_text:
                 continue
             
-            # TTS
-            audio = await synthesizer.synthesize(en_text)
+            # Skip TTS in test mode to avoid wasting credits
+            # Audio is not played or returned in dashboard test pipeline
             
             latency = time.time() - t0
             total_latency += latency
@@ -294,7 +305,7 @@ async def websocket_handler(request):
 # ── App Setup ───────────────────────────────────────────────────
 
 def create_app():
-    app = web.Application()
+    app = web.Application(middlewares=[auth_middleware])
     app.router.add_get("/", index)
     app.router.add_get("/ws", websocket_handler)
     app.router.add_get("/api/status", api_status)
@@ -314,4 +325,5 @@ if __name__ == "__main__":
     port = int(os.getenv("DASHBOARD_PORT", "8080"))
     app = create_app()
     logger.info("Dashboard starting on http://localhost:%d", port)
-    web.run_app(app, host="0.0.0.0", port=port)
+    host = os.getenv("DASHBOARD_HOST", "127.0.0.1")
+    web.run_app(app, host=host, port=port)

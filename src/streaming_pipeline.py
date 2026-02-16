@@ -292,17 +292,48 @@ class StreamingPipeline:
             await self._playback_queue.put(chunk)
 
     async def _playback_worker(self):
-        """Plays audio chunks in order."""
+        """Plays audio chunks in order, skipping missing sequences after timeout."""
         logger.info("▶️ Playback worker started")
         next_seq = 1
         buffer: dict[int, ChunkState] = {}
+        _SEQ_TIMEOUT = 5.0  # seconds to wait for a missing sequence before skipping
         
         while self._running:
-            chunk = await self._playback_queue.get()
-            if chunk.seq == -1:
-                break
-            
-            buffer[chunk.seq] = chunk
+            # If next_seq not in buffer, wait with a timeout then skip gaps
+            if next_seq not in buffer:
+                try:
+                    chunk = await asyncio.wait_for(
+                        self._playback_queue.get(), timeout=_SEQ_TIMEOUT
+                    )
+                except asyncio.TimeoutError:
+                    # Skip missing sequences — advance to the lowest buffered seq
+                    if buffer:
+                        skipped_to = min(buffer)
+                        logger.warning(
+                            "⏭️ Seq #%d–#%d missing after %.1fs, skipping to #%d",
+                            next_seq, skipped_to - 1, _SEQ_TIMEOUT, skipped_to,
+                        )
+                        next_seq = skipped_to
+                    continue
+                else:
+                    if chunk.seq == -1:
+                        break
+                    buffer[chunk.seq] = chunk
+            else:
+                # Drain any additional chunks already available
+                try:
+                    chunk = self._playback_queue.get_nowait()
+                    if chunk.seq == -1:
+                        # Play remaining buffered before exiting
+                        while next_seq in buffer:
+                            c = buffer.pop(next_seq)
+                            next_seq += 1
+                            if c.audio_bytes:
+                                await self.playback.play(c.audio_bytes)
+                        break
+                    buffer[chunk.seq] = chunk
+                except asyncio.QueueEmpty:
+                    pass
             
             # Play in order
             while next_seq in buffer:
