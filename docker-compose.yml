@@ -1,0 +1,13 @@
+services:
+  church-translator:
+    build: .
+    container_name: church-translator
+    ports:
+      - "8085:8085"
+    volumes:
+      - ./.env:/app/.env:ro
+      - ./config.json:/app/config.json
+      - ./output:/app/output
+    env_file:
+      - .env
+    restart: unless-stopped

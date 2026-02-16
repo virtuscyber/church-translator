@@ -1,0 +1,16 @@
+[Unit]
+Description=Church Live Translator Dashboard
+After=network.target
+
+[Service]
+Type=simple
+User=__USER__
+WorkingDirectory=__INSTALL_DIR__
+ExecStart=__INSTALL_DIR__/venv/bin/python dashboard/server.py
+Restart=on-failure
+RestartSec=5
+Environment=DASHBOARD_HOST=127.0.0.1
+Environment=DASHBOARD_PORT=8085
+
+[Install]
+WantedBy=multi-user.target

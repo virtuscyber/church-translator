@@ -16,38 +16,82 @@ Dante (Ukrainian audio) → Whisper STT → GPT-4o Translation → ElevenLabs TT
 
 **Expected latency: 10-15 seconds** | **Cost: ~$2-3/hour**
 
-## Quick Start
+---
+
+## 🚀 Quick Start (Docker — Recommended)
+
+The fastest way to get running. You just need [Docker](https://docs.docker.com/get-docker/) installed.
+
+```bash
+git clone https://github.com/virtuscyber/church-translator.git
+cd church-translator
+docker compose up -d
+```
+
+Open **http://localhost:8085** in your browser. The setup wizard will walk you through entering your API keys.
+
+**That's it!** Your data (API keys, config, recordings) persists across restarts.
+
+```bash
+# Useful commands
+docker compose logs -f          # Watch logs
+docker compose down             # Stop
+docker compose up -d --build    # Rebuild after updates
+```
+
+---
+
+## 📦 One-Line Install Script
+
+For a native install (no Docker), run:
+
+```bash
+curl -sL https://raw.githubusercontent.com/virtuscyber/church-translator/main/install.sh | bash
+```
+
+Or with Docker:
+
+```bash
+curl -sL https://raw.githubusercontent.com/virtuscyber/church-translator/main/install.sh | bash -s -- --docker
+```
+
+The script will:
+- Detect your OS (macOS, Ubuntu/Debian, Fedora, Arch)
+- Install Python 3.11+, ffmpeg, and other prerequisites
+- Clone the repo, create a virtualenv, install dependencies
+- Optionally set up auto-start (systemd on Linux)
+
+---
+
+## 🔧 Manual Install
 
 ### Prerequisites
 
 - Python 3.11+
-- [Dante Via](https://www.getdante.com/products/software-essentials/dante-via/) ($50) or Dante Virtual Soundcard ($30)
+- ffmpeg
 - OpenAI API key
 - ElevenLabs API key
+- [Dante Via](https://www.getdante.com/products/software-essentials/dante-via/) ($50) or Dante Virtual Soundcard ($30) *(for Dante audio routing)*
 
 ### Setup
 
 ```bash
-# Clone and install
-git clone <repo-url>
+git clone https://github.com/virtuscyber/church-translator.git
 cd church-translator
+
+python3 -m venv venv
+source venv/bin/activate
 pip install -r requirements.txt
 
-# Configure API keys
-cp .env.example .env
-# Edit .env with your keys
-
-# Find your audio devices
-python scripts/list_devices.py
-
-# Edit config.yaml with your Dante device names
-# Set input_device and output_device
-
-# Run
-python -m src.main
+# Start the dashboard
+python dashboard/server.py
 ```
 
-### Dante Configuration
+Open **http://localhost:8085** — the setup wizard handles API key configuration.
+
+---
+
+## ⛪ Dante Configuration
 
 1. Open **Dante Controller** on the network
 2. Route the preacher's microphone channel to Dante Via on the translation PC

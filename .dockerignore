@@ -1,0 +1,14 @@
+venv/
+.venv/
+.git/
+.gitignore
+output/
+__pycache__/
+*.pyc
+.env
+config.json
+*.egg-info/
+dist/
+build/
+.pytest_cache/
+node_modules/
