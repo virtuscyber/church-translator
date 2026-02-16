@@ -67,7 +67,7 @@ class Synthesizer:
 
         client = AsyncElevenLabs(api_key=self.elevenlabs_api_key)
 
-        audio_iter = await client.text_to_speech.convert(
+        audio_iter = client.text_to_speech.convert(
             voice_id=self.el_voice_id,
             text=text,
             model_id=self.el_model,
@@ -78,10 +78,25 @@ class Synthesizer:
             output_format="pcm_24000",
         )
 
-        # Collect all chunks
+        # Collect all chunks — handle both sync and async iterators
         chunks = []
-        async for chunk in audio_iter:
-            chunks.append(chunk)
+        if hasattr(audio_iter, '__aiter__'):
+            async for chunk in audio_iter:
+                chunks.append(chunk)
+        elif hasattr(audio_iter, '__iter__'):
+            for chunk in audio_iter:
+                chunks.append(chunk)
+        else:
+            # It's a coroutine that needs awaiting first
+            result = await audio_iter
+            if hasattr(result, '__aiter__'):
+                async for chunk in result:
+                    chunks.append(chunk)
+            elif hasattr(result, '__iter__'):
+                for chunk in result:
+                    chunks.append(chunk)
+            else:
+                chunks.append(result)
         
         return b"".join(chunks)
 
