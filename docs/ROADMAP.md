@@ -100,9 +100,11 @@ An open-source, self-hosted live translation system for churches. Any church can
 ## Phase 6 — Polish & Community
 
 ### 6.1 Deployment & Docs
-- [ ] One-click install script (Docker or native)
+- [x] One-click install script (Docker or native)
+- [x] Dockerfile + docker-compose.yml
+- [x] Systemd service file for Linux auto-start
 - [ ] Raspberry Pi support (budget-friendly hardware)
-- [ ] Comprehensive README with screenshots
+- [x] Comprehensive README with Docker/install/manual sections
 - [ ] Video tutorial: "Set up live translation for your church in 15 minutes"
 - [ ] Troubleshooting guide (Dante setup, ffmpeg, API issues)
 
