@@ -875,6 +875,8 @@ def create_app():
     # Feature 1 & 2: Config
     app.router.add_get("/api/config", api_get_config)
     app.router.add_post("/api/config", api_save_config)
+    app.router.add_get("/api/settings", api_get_config)
+    app.router.add_post("/api/settings", api_save_config)
     app.router.add_get("/api/languages", api_languages)
     # Feature 3: Setup wizard
     app.router.add_get("/api/setup/status", api_setup_status)

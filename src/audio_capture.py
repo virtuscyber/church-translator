@@ -9,9 +9,15 @@ import struct
 from typing import Optional
 
 import numpy as np
-import sounddevice as sd
 
 logger = logging.getLogger(__name__)
+
+
+def _load_sounddevice():
+    """Import sounddevice lazily so module import works without PortAudio."""
+    import sounddevice as sd
+
+    return sd
 
 
 class AudioCapture:
@@ -28,7 +34,7 @@ class AudioCapture:
         self.sample_rate = sample_rate
         self.channels = channels
         self.chunk_duration_sec = chunk_duration_sec
-        self._stream: Optional[sd.InputStream] = None
+        self._stream = None
         self._buffer: list[np.ndarray] = []
         self._lock = asyncio.Lock()
         self._running = False
@@ -50,6 +56,7 @@ class AudioCapture:
             self.sample_rate,
             self.channels,
         )
+        sd = _load_sounddevice()
         self._running = True
         self._buffer = []
         self._stream = sd.InputStream(
