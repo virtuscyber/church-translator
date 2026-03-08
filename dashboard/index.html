@@ -93,6 +93,31 @@
             color: var(--text);
         }
 
+        .level-row {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            margin-bottom: 6px;
+            cursor: pointer;
+            padding: 4px 6px;
+            border-radius: 6px;
+            transition: background 0.15s;
+        }
+        .level-row:hover { background: var(--surface-2); }
+        .level-row.has-audio { background: rgba(34,197,94,0.08); }
+        .level-row.has-audio:hover { background: rgba(34,197,94,0.15); }
+        .level-name { font-size: 0.8em; min-width: 180px; max-width: 220px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        .level-bar-bg { flex: 1; height: 16px; background: var(--bg); border-radius: 3px; overflow: hidden; border: 1px solid var(--border); }
+        .level-bar-fill { height: 100%; border-radius: 2px; transition: width 0.2s; min-width: 0; }
+        .level-bar-fill.silent { background: var(--border); }
+        .level-bar-fill.low { background: #22c55e; }
+        .level-bar-fill.medium { background: #eab308; }
+        .level-bar-fill.hot { background: #ef4444; }
+        .level-db { font-size: 0.7em; color: var(--text-dim); min-width: 48px; text-align: right; }
+        .level-badge { font-size: 0.65em; padding: 1px 6px; border-radius: 9px; font-weight: 600; }
+        .level-badge.active { background: #22c55e; color: #000; }
+        .level-badge.silent { background: var(--border); color: var(--text-dim); }
+
         /* ── Status Badge ───────────────────────── */
         .status-badge {
             display: flex;
@@ -639,6 +664,45 @@
             </div>
         </div>
 
+        <!-- Audio Level Monitor -->
+        <div class="form-group" style="border:1px solid var(--border);border-radius:8px;padding:12px;margin-top:4px;">
+            <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px;">
+                <label style="margin:0;">📊 Audio Input Monitor</label>
+                <button class="btn btn-secondary btn-sm" id="scanBtn" onclick="toggleAudioScan()">🔍 Scan All Inputs</button>
+            </div>
+            <div id="audioMonitorHint" style="font-size:0.8em;color:var(--text-dim);margin-bottom:8px;">
+                Click "Scan All Inputs" to see which devices have live audio. Green bars = active audio source.
+            </div>
+            <div id="audioLevelBars" style="display:none;"></div>
+            <div id="selectedDeviceLevel" style="margin-top:8px;display:none;">
+                <div style="display:flex;align-items:center;gap:8px;">
+                    <span style="font-size:0.8em;color:var(--text-dim);min-width:120px;" id="selectedDeviceName">Selected input:</span>
+                    <div style="flex:1;height:20px;background:var(--bg);border-radius:4px;overflow:hidden;border:1px solid var(--border);">
+                        <div id="selectedLevelBar" style="height:100%;width:0%;background:linear-gradient(90deg,#22c55e,#eab308,#ef4444);transition:width 0.15s;border-radius:3px;"></div>
+                    </div>
+                    <span style="font-size:0.75em;color:var(--text-dim);min-width:55px;" id="selectedLevelDb">—</span>
+                </div>
+            </div>
+        </div>
+
+        <!-- Dante Via Setup Guide -->
+        <details style="border:1px solid var(--border);border-radius:8px;padding:8px 12px;margin-top:4px;">
+            <summary style="cursor:pointer;font-weight:600;color:var(--accent);">🎛️ Dante Via Setup Guide</summary>
+            <div style="font-size:0.82em;color:var(--text-dim);margin-top:8px;line-height:1.6;">
+                <p><strong>If you're using Dante Via to route audio from your Dante network:</strong></p>
+                <ol style="padding-left:20px;">
+                    <li>Open <strong>Dante Via</strong> on this machine</li>
+                    <li>In the <strong>Audio Device</strong> tab, find the Dante channel carrying the preacher's mic</li>
+                    <li>Click the <strong>▶</strong> button next to it — this routes it to a virtual input device</li>
+                    <li>The virtual device will appear in the Microphone dropdown above</li>
+                    <li>Click <strong>🔍 Scan All Inputs</strong> — speak into the mic and look for the green bar</li>
+                    <li>Select that device, save settings, and start translating!</li>
+                </ol>
+                <p style="margin-top:8px;"><strong>Tip:</strong> Dante Via devices typically show up as "Dante Via Receive" or similar. The scan makes it easy to find — just look for the one with the live audio bars.</p>
+                <p><strong>Without Dante Via:</strong> If you're using a USB mic or laptop mic directly, just scan and select the device showing audio.</p>
+            </div>
+        </details>
+
         <!-- Language Selection -->
         <div class="form-row">
             <div class="form-group">
@@ -918,6 +982,96 @@
             sel.appendChild(opt);
         });
     }
+
+    // ── Audio Level Monitor ─────────────────────────
+    let audioScanInterval = null;
+    let selectedLevelInterval = null;
+
+    async function toggleAudioScan() {
+        const btn = document.getElementById('scanBtn');
+        const bars = document.getElementById('audioLevelBars');
+        if (audioScanInterval) {
+            clearInterval(audioScanInterval);
+            audioScanInterval = null;
+            btn.textContent = '🔍 Scan All Inputs';
+            bars.style.display = 'none';
+            return;
+        }
+        btn.textContent = '⏹️ Stop Scan';
+        bars.style.display = 'block';
+        bars.innerHTML = '<div style="color:var(--text-dim);font-size:0.8em;">Scanning all input devices...</div>';
+        await scanAudioLevels();
+        audioScanInterval = setInterval(scanAudioLevels, 1500);
+    }
+
+    async function scanAudioLevels() {
+        try {
+            const res = await fetch('/api/audio-levels');
+            const data = await res.json();
+            const bars = document.getElementById('audioLevelBars');
+            if (!data.devices || data.devices.length === 0) {
+                bars.innerHTML = '<div style="color:var(--text-dim);font-size:0.8em;">No input devices found.</div>';
+                return;
+            }
+            const sorted = [...data.devices].sort((a, b) => (b.level_pct || 0) - (a.level_pct || 0));
+            bars.innerHTML = sorted.map(d => {
+                const pct = d.level_pct || 0;
+                const hasAudio = d.has_audio;
+                const fillClass = d.error ? 'silent' : pct > 80 ? 'hot' : pct > 30 ? 'medium' : pct > 5 ? 'low' : 'silent';
+                const badge = hasAudio
+                    ? '<span class="level-badge active">LIVE</span>'
+                    : '<span class="level-badge silent">silent</span>';
+                const dbText = d.error ? 'err' : d.level_db !== null ? `${d.level_db} dB` : '—';
+                const escapedName = d.name.replace(/'/g, "\\'");
+                return `<div class="level-row ${hasAudio ? 'has-audio' : ''}" onclick="selectInputDevice(${d.index}, '${escapedName}')">
+                    <div class="level-name" title="${d.name}">${d.name}</div>
+                    <div class="level-bar-bg"><div class="level-bar-fill ${fillClass}" style="width:${pct}%"></div></div>
+                    <div class="level-db">${dbText}</div>
+                    ${badge}
+                </div>`;
+            }).join('');
+        } catch (e) {
+            console.error('Audio scan failed:', e);
+        }
+    }
+
+    function selectInputDevice(index, name) {
+        document.getElementById('inputDevice').value = index;
+        showToast('\u2705 Selected: ' + name);
+        startSelectedDeviceMonitor(index, name);
+    }
+
+    function startSelectedDeviceMonitor(index, name) {
+        const panel = document.getElementById('selectedDeviceLevel');
+        panel.style.display = 'block';
+        document.getElementById('selectedDeviceName').textContent = name.substring(0, 20);
+        if (selectedLevelInterval) clearInterval(selectedLevelInterval);
+        async function poll() {
+            try {
+                const res = await fetch('/api/audio-level', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({device_index: index}),
+                });
+                const d = await res.json();
+                const bar = document.getElementById('selectedLevelBar');
+                const db = document.getElementById('selectedLevelDb');
+                const pct = d.level_pct || 0;
+                bar.style.width = pct + '%';
+                db.textContent = d.peak_db !== undefined ? d.peak_db + ' dB' : '\u2014';
+            } catch (e) {}
+        }
+        poll();
+        selectedLevelInterval = setInterval(poll, 300);
+    }
+
+    document.getElementById('inputDevice').addEventListener('change', function() {
+        const idx = this.value;
+        if (idx !== '') {
+            const name = this.options[this.selectedIndex]?.text || '';
+            startSelectedDeviceMonitor(parseInt(idx), name);
+        }
+    });
 
     // ── Model Selection Notes ─────────────────────────
     const modelNotes = {
