@@ -109,6 +109,9 @@ class AppState:
     start_time: float = 0.0
     live_pipeline = None
     live_task = None
+    live_capture = None
+    live_playback = None
+    live_aes67 = None
 
 state = AppState()
 
@@ -533,7 +536,24 @@ async def api_stop_live(request):
     state.live_running = False
     state.running = False
 
-    # Stop the pipeline
+    # Stop the audio capture (microphone) immediately
+    if state.live_capture:
+        try:
+            await state.live_capture.stop()
+            logger.info("Live capture stopped")
+        except Exception as e:
+            logger.warning("Error stopping capture: %s", e)
+        state.live_capture = None
+
+    # Stop AES67 output
+    if state.live_aes67:
+        try:
+            state.live_aes67.stop()
+        except Exception as e:
+            logger.warning("Error stopping AES67: %s", e)
+        state.live_aes67 = None
+
+    # Stop the pipeline (if set)
     if state.live_pipeline:
         try:
             await state.live_pipeline.stop()
@@ -541,7 +561,7 @@ async def api_stop_live(request):
             logger.warning("Error stopping pipeline: %s", e)
         state.live_pipeline = None
 
-    # Cancel the task
+    # Cancel the background task
     if state.live_task and not state.live_task.done():
         state.live_task.cancel()
         try:
@@ -549,6 +569,8 @@ async def api_stop_live(request):
         except (asyncio.CancelledError, Exception):
             pass
         state.live_task = None
+
+    state.live_playback = None
 
     state.stats["status"] = "stopped"
     state.stats["total_runtime"] = time.time() - state.start_time
@@ -650,6 +672,11 @@ async def _run_live_pipeline():
             )
             aes67.start()
 
+        # Store references so api_stop_live can stop them
+        state.live_capture = capture
+        state.live_playback = playback
+        state.live_aes67 = aes67
+
         await capture.start()
         await broadcast({"type": "info", "message": "Microphone active — listening for speech..."})
 
@@ -737,11 +764,26 @@ async def _run_live_pipeline():
         logger.error("Live pipeline error: %s", e, exc_info=True)
         await broadcast({"type": "error", "message": f"Live translation error: {e}"})
     finally:
+        # Ensure all audio resources are released
+        if state.live_capture:
+            try:
+                await state.live_capture.stop()
+            except Exception:
+                pass
+            state.live_capture = None
+        if state.live_aes67:
+            try:
+                state.live_aes67.stop()
+            except Exception:
+                pass
+            state.live_aes67 = None
+        state.live_playback = None
         state.live_running = False
         state.running = False
         state.stats["status"] = "stopped"
         state.stats["total_runtime"] = time.time() - state.start_time
         state.live_pipeline = None
+        logger.info("Live pipeline fully stopped and cleaned up")
 
 
 # ── Health Check ───────────────────────────────────────────────
