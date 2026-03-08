@@ -108,6 +108,7 @@
 
         .status-badge.stopped { background: var(--surface-2); color: var(--text-dim); border: 1px solid var(--border); }
         .status-badge.running { background: var(--green-glow); color: var(--green); border: 1px solid rgba(74, 222, 128, 0.3); }
+        .status-badge.live { background: rgba(248, 113, 113, 0.15); color: var(--red); border: 1px solid rgba(248, 113, 113, 0.3); }
         .status-badge.error { background: rgba(248, 113, 113, 0.15); color: var(--red); border: 1px solid rgba(248, 113, 113, 0.3); }
 
         .status-dot { width: 8px; height: 8px; border-radius: 50%; background: currentColor; }
@@ -543,6 +544,42 @@
             gap: 12px;
         }
 
+        /* ── Health Check Panel ─────────────────── */
+        .health-panel { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 24px; }
+        .health-panel h2 { font-size: 16px; font-weight: 600; margin-bottom: 16px; display: flex; align-items: center; gap: 8px; }
+        .health-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 12px; }
+        .health-item {
+            background: var(--bg); border: 1px solid var(--border); border-radius: var(--radius-sm);
+            padding: 14px 16px; display: flex; align-items: center; gap: 10px;
+        }
+        .health-icon { font-size: 20px; flex-shrink: 0; }
+        .health-label { font-size: 13px; font-weight: 600; }
+        .health-detail { font-size: 12px; color: var(--text-dim); margin-top: 2px; }
+        .health-item.ok { border-color: rgba(74, 222, 128, 0.3); }
+        .health-item.fail { border-color: rgba(248, 113, 113, 0.3); background: rgba(248, 113, 113, 0.05); }
+
+        /* ── Live Controls ─────────────────────────── */
+        .live-controls { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 24px; }
+        .live-controls h2 { font-size: 16px; font-weight: 600; margin-bottom: 16px; display: flex; align-items: center; gap: 8px; }
+        .btn-live {
+            background: linear-gradient(135deg, #e53e3e, #c53030);
+            color: white; font-size: 17px; padding: 16px 36px;
+            border: none; border-radius: var(--radius-sm);
+            font-weight: 700; cursor: pointer; transition: all 0.2s;
+            display: inline-flex; align-items: center; gap: 10px;
+        }
+        .btn-live:hover { transform: translateY(-1px); box-shadow: 0 4px 20px rgba(229, 62, 62, 0.3); }
+        .btn-live:disabled { opacity: 0.5; cursor: not-allowed; transform: none; box-shadow: none; }
+        .btn-stop-live {
+            background: var(--surface-2); color: var(--text);
+            border: 1px solid var(--border); font-size: 17px;
+            padding: 16px 36px; border-radius: var(--radius-sm);
+            font-weight: 700; cursor: pointer; transition: all 0.2s;
+            display: inline-flex; align-items: center; gap: 10px;
+        }
+        .btn-stop-live:hover { background: var(--border); }
+        .live-status-text { margin-top: 12px; font-size: 14px; color: var(--text-dim); min-height: 22px; }
+
         /* ── Responsive ─────────────────────────── */
         @media (max-width: 768px) {
             .header { padding: 16px; flex-wrap: wrap; }
@@ -623,6 +660,28 @@
         <div style="display:flex;justify-content:flex-end;margin-top:12px;">
             <button class="btn btn-primary btn-sm" onclick="saveSettings()">💾 Save Settings</button>
         </div>
+    </div>
+
+    <!-- Health Check Panel -->
+    <div class="health-panel" id="healthPanel">
+        <h2>System Health</h2>
+        <div class="health-grid" id="healthGrid">
+            <div class="health-item" id="healthPython"><div class="health-icon">...</div><div><div class="health-label">Python</div><div class="health-detail">Checking...</div></div></div>
+            <div class="health-item" id="healthFfmpeg"><div class="health-icon">...</div><div><div class="health-label">ffmpeg</div><div class="health-detail">Checking...</div></div></div>
+            <div class="health-item" id="healthApiKeys"><div class="health-icon">...</div><div><div class="health-label">API Keys</div><div class="health-detail">Checking...</div></div></div>
+            <div class="health-item" id="healthAudio"><div class="health-icon">...</div><div><div class="health-label">Audio Devices</div><div class="health-detail">Checking...</div></div></div>
+            <div class="health-item" id="healthNetwork"><div class="health-icon">...</div><div><div class="health-label">Network</div><div class="health-detail">Checking...</div></div></div>
+        </div>
+    </div>
+
+    <!-- Live Translation Controls -->
+    <div class="live-controls">
+        <h2>Live Translation</h2>
+        <div>
+            <button class="btn-live" id="liveStartBtn" onclick="startLive()">Start Live Translation</button>
+            <button class="btn-stop-live" id="liveStopBtn" onclick="stopLive()" style="display:none;">Stop Translation</button>
+        </div>
+        <div class="live-status-text" id="liveStatusText">Select your microphone and language above, then start translating.</div>
     </div>
 
     <!-- Stats Row -->
@@ -764,6 +823,7 @@
     loadConfig();
     populateLanguageDropdowns();
     checkSetupStatus();
+    loadHealthChecks();
 
     function populateLanguageDropdowns() {
         const sourceExclude = ['en'];  // English typically not a source for church translation
@@ -1057,7 +1117,14 @@
                 if (msg.status === 'completed') showToast('✅ Translation complete!');
                 break;
             case 'stt':
-                document.getElementById('statStatus').textContent = `🎙️ Listening... (${msg.seq}/${msg.total})`;
+                if (msg.total > 0) {
+                    document.getElementById('statStatus').textContent = `Listening... (${msg.seq}/${msg.total})`;
+                } else {
+                    document.getElementById('statStatus').textContent = `Listening... (chunk ${msg.seq})`;
+                    if (document.getElementById('liveStatusText')) {
+                        document.getElementById('liveStatusText').textContent = `Processing chunk ${msg.seq}...`;
+                    }
+                }
                 document.getElementById('statStatus').style.color = 'var(--accent)';
                 break;
             case 'translation':
@@ -1207,6 +1274,103 @@
     async function stopTest() {
         try { await fetch('/api/stop', {method: 'POST'}); } catch (err) { showToast('❌ Failed to stop: ' + err.message); }
     }
+
+    // ── Health Checks ────────────────────────────
+    async function loadHealthChecks() {
+        try {
+            const res = await fetch('/api/health');
+            const data = await res.json();
+            const checks = data.checks;
+            renderHealthItem('healthPython', checks.python);
+            renderHealthItem('healthFfmpeg', checks.ffmpeg);
+            renderHealthItem('healthApiKeys', checks.api_keys);
+            renderHealthItem('healthAudio', checks.audio);
+            renderHealthItem('healthNetwork', checks.network);
+        } catch (e) {
+            console.error('Health check failed:', e);
+        }
+    }
+
+    function renderHealthItem(id, check) {
+        const el = document.getElementById(id);
+        el.className = 'health-item ' + (check.ok ? 'ok' : 'fail');
+        const icon = el.querySelector('.health-icon');
+        const detail = el.querySelector('.health-detail');
+        icon.textContent = check.ok ? '\u2705' : '\u274C';
+        detail.textContent = check.detail || '';
+    }
+
+    // ── Live Translation ─────────────────────────
+    let liveMode = false;
+
+    async function startLive() {
+        // Save settings first
+        await saveSettings();
+
+        const body = document.getElementById('transcriptBody');
+        body.innerHTML = '';
+        document.getElementById('transcriptCount').textContent = '0 segments';
+        document.getElementById('statChunks').textContent = '0';
+
+        try {
+            const res = await fetch('/api/start-live', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+            });
+            const data = await res.json();
+            if (data.error) {
+                showToast('\u274C ' + data.error);
+            } else {
+                liveMode = true;
+            }
+        } catch (err) {
+            showToast('\u274C Failed to start live: ' + err.message);
+        }
+    }
+
+    async function stopLive() {
+        try {
+            await fetch('/api/stop-live', { method: 'POST' });
+            liveMode = false;
+        } catch (err) {
+            showToast('\u274C Failed to stop: ' + err.message);
+        }
+    }
+
+    // Update the status handler to support 'live' state
+    const _origUpdateStatus = updateStatus;
+    updateStatus = function(status) {
+        const liveStartBtn = document.getElementById('liveStartBtn');
+        const liveStopBtn = document.getElementById('liveStopBtn');
+        const liveStatusText = document.getElementById('liveStatusText');
+
+        if (status === 'live') {
+            const badge = document.getElementById('statusBadge');
+            const text = document.getElementById('statusText');
+            const live = document.getElementById('liveIndicator');
+            const statStatus = document.getElementById('statStatus');
+
+            badge.className = 'status-badge live';
+            text.textContent = 'LIVE';
+            live.classList.add('active');
+            statStatus.textContent = 'Live translating...';
+            statStatus.style.color = 'var(--red)';
+            liveStartBtn.style.display = 'none';
+            liveStopBtn.style.display = 'inline-flex';
+            liveStatusText.textContent = 'Listening for speech...';
+            // Disable file test during live
+            document.getElementById('startBtn').disabled = true;
+        } else {
+            _origUpdateStatus(status);
+            if (status === 'stopped' || status === 'completed' || status === 'error') {
+                liveStartBtn.style.display = 'inline-flex';
+                liveStopBtn.style.display = 'none';
+                liveStatusText.textContent = 'Select your microphone and language above, then start translating.';
+                document.getElementById('startBtn').disabled = false;
+                liveMode = false;
+            }
+        }
+    };
 </script>
 
 </body>

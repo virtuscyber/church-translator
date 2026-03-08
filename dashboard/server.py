@@ -97,6 +97,7 @@ async def auth_middleware(request: web.Request, handler):
 class AppState:
     """Shared state between dashboard and pipeline."""
     running: bool = False
+    live_running: bool = False
     connected_clients: list = []
     transcript: list[dict] = []
     stats: dict = {
@@ -106,6 +107,8 @@ class AppState:
         "status": "stopped",
     }
     start_time: float = 0.0
+    live_pipeline = None
+    live_task = None
 
 state = AppState()
 
@@ -501,6 +504,328 @@ async def _run_file_test(file_path: str):
         await broadcast({"type": "error", "message": str(e)})
 
 
+# ── Live Translation Pipeline ──────────────────────────────────
+
+async def api_start_live(request):
+    """Start live mic → translate → speak pipeline."""
+    if state.running or state.live_running:
+        return web.json_response({"error": "Already running"}, status=400)
+
+    state.live_running = True
+    state.running = True
+    state.start_time = time.time()
+    state.stats["status"] = "live"
+    state.transcript = []
+    state.stats["chunks_processed"] = 0
+    state.stats["avg_latency"] = 0.0
+
+    await broadcast({"type": "status", "status": "live"})
+    state.live_task = asyncio.create_task(_run_live_pipeline())
+
+    return web.json_response({"status": "started", "mode": "live"})
+
+
+async def api_stop_live(request):
+    """Stop the live translation pipeline."""
+    if not state.live_running:
+        return web.json_response({"error": "Not running"}, status=400)
+
+    state.live_running = False
+    state.running = False
+
+    # Stop the pipeline
+    if state.live_pipeline:
+        try:
+            await state.live_pipeline.stop()
+        except Exception as e:
+            logger.warning("Error stopping pipeline: %s", e)
+        state.live_pipeline = None
+
+    # Cancel the task
+    if state.live_task and not state.live_task.done():
+        state.live_task.cancel()
+        try:
+            await state.live_task
+        except (asyncio.CancelledError, Exception):
+            pass
+        state.live_task = None
+
+    state.stats["status"] = "stopped"
+    state.stats["total_runtime"] = time.time() - state.start_time
+
+    await broadcast({
+        "type": "status",
+        "status": "stopped",
+        "stats": {
+            "chunks_processed": state.stats["chunks_processed"],
+            "avg_latency": round(state.stats["avg_latency"], 1),
+            "total_runtime": round(state.stats["total_runtime"], 1),
+        },
+    })
+    return web.json_response({"status": "stopped"})
+
+
+async def _run_live_pipeline():
+    """Background task running the live translation pipeline with dashboard integration."""
+    try:
+        from src.config import load_config
+        from src.transcriber import Transcriber
+        from src.translator import Translator
+        from src.synthesizer import Synthesizer
+        from src.vad_capture import VADAudioCapture
+        from src.audio_playback import AudioPlayback
+
+        config = load_config()
+
+        # Apply saved config
+        saved = load_saved_config()
+        src_lang = saved.get("source_language", config.transcription.language)
+        tgt_lang = saved.get("target_language", "en")
+        custom_vocab = saved.get("custom_vocabulary", "")
+
+        # Override audio devices from saved config
+        input_dev = saved.get("input_device")
+        output_dev = saved.get("output_device")
+        if input_dev is not None and input_dev != "":
+            config.audio.input_device = int(input_dev)
+        if output_dev is not None and output_dev != "":
+            config.audio.output_device = int(output_dev)
+
+        # Initialize components
+        capture = VADAudioCapture(
+            device=config.audio.input_device,
+            sample_rate=config.audio.sample_rate,
+            channels=config.audio.channels,
+            vad_aggressiveness=config.pipeline.vad_aggressiveness,
+            min_chunk_sec=config.pipeline.min_chunk_sec,
+            max_chunk_sec=config.pipeline.max_chunk_sec,
+            silence_threshold_sec=config.pipeline.silence_threshold_sec,
+        )
+
+        transcriber = Transcriber(
+            api_key=config.openai_api_key,
+            model=config.transcription.model,
+            language=src_lang,
+        )
+
+        system_prompt = config.translation.system_prompt
+        if custom_vocab:
+            system_prompt += f"\n\nCustom vocabulary and terms to use:\n{custom_vocab}"
+
+        translator = Translator(
+            api_key=config.openai_api_key,
+            system_prompt=system_prompt,
+            model=config.translation.model,
+            temperature=config.translation.temperature,
+            context_sentences=config.pipeline.context_sentences,
+        )
+
+        synthesizer = Synthesizer(
+            provider=config.synthesis.provider,
+            openai_api_key=config.openai_api_key,
+            elevenlabs_api_key=config.elevenlabs_api_key,
+            elevenlabs_voice_id=config.synthesis.elevenlabs.voice_id,
+            elevenlabs_model=config.synthesis.elevenlabs.model,
+            elevenlabs_stability=config.synthesis.elevenlabs.stability,
+            elevenlabs_similarity=config.synthesis.elevenlabs.similarity_boost,
+            openai_model=config.synthesis.openai.model,
+            openai_voice=config.synthesis.openai.voice,
+        )
+
+        playback = AudioPlayback(
+            device=config.audio.output_device,
+            sample_rate=24000,
+            channels=1,
+        )
+
+        # Optional AES67
+        aes67 = None
+        if config.output.mode in ("dante", "both"):
+            from src.aes67_output import AES67Sender
+            aes67 = AES67Sender(
+                stream_name=config.output.stream_name,
+                multicast_addr=config.output.multicast_address,
+                port=config.output.port,
+                ttl=config.output.ttl,
+            )
+            aes67.start()
+
+        await capture.start()
+        await broadcast({"type": "info", "message": "Microphone active — listening for speech..."})
+
+        lang_names = {l["code"]: l["name"] for l in SUPPORTED_LANGUAGES}
+        src_name = lang_names.get(src_lang, src_lang)
+        tgt_name = lang_names.get(tgt_lang, tgt_lang)
+        total_latency = 0.0
+        chunk_count = 0
+
+        while state.live_running:
+            try:
+                wav_bytes = await capture.get_chunk()
+            except Exception:
+                if not state.live_running:
+                    break
+                continue
+            if wav_bytes is None:
+                continue
+
+            t0 = time.time()
+
+            # STT
+            src_text = await transcriber.transcribe(wav_bytes)
+            if not src_text:
+                continue
+
+            chunk_count += 1
+            await broadcast({
+                "type": "stt",
+                "seq": chunk_count,
+                "total": 0,
+                "text": src_text,
+            })
+
+            # Translate
+            tgt_text = await translator.translate(src_text)
+            if not tgt_text:
+                continue
+
+            latency = time.time() - t0
+            total_latency += latency
+            state.stats["chunks_processed"] = chunk_count
+            state.stats["avg_latency"] = total_latency / chunk_count
+
+            entry = {
+                "seq": chunk_count,
+                "source": src_text,
+                "translated": tgt_text,
+                "source_lang": src_lang,
+                "target_lang": tgt_lang,
+                "latency": round(latency, 1),
+                "timestamp": time.time(),
+                "ukrainian": src_text,
+                "english": tgt_text,
+            }
+            state.transcript.append(entry)
+
+            await broadcast({
+                "type": "translation",
+                "entry": entry,
+                "progress": 0,
+                "stats": {
+                    "chunks_processed": chunk_count,
+                    "total_chunks": 0,
+                    "avg_latency": round(state.stats["avg_latency"], 1),
+                },
+            })
+
+            # TTS + playback (don't block the loop for the next chunk)
+            audio_bytes = await synthesizer.synthesize(tgt_text)
+            if audio_bytes:
+                play_tasks = [playback.play(audio_bytes)]
+                if aes67:
+                    play_tasks.append(aes67.play(audio_bytes))
+                await asyncio.gather(*play_tasks)
+
+        # Cleanup
+        await capture.stop()
+        if aes67:
+            aes67.stop()
+
+    except asyncio.CancelledError:
+        logger.info("Live pipeline cancelled")
+    except Exception as e:
+        logger.error("Live pipeline error: %s", e, exc_info=True)
+        await broadcast({"type": "error", "message": f"Live translation error: {e}"})
+    finally:
+        state.live_running = False
+        state.running = False
+        state.stats["status"] = "stopped"
+        state.stats["total_runtime"] = time.time() - state.start_time
+        state.live_pipeline = None
+
+
+# ── Health Check ───────────────────────────────────────────────
+
+async def api_health(request):
+    """Return system health checks as JSON."""
+    import shutil as _shutil
+    from dotenv import load_dotenv as _load_dotenv
+
+    _load_dotenv(PROJECT_ROOT / ".env", override=True)
+
+    checks = {}
+
+    # Python version
+    v = sys.version_info
+    checks["python"] = {
+        "ok": v.major >= 3 and v.minor >= 11,
+        "version": f"{v.major}.{v.minor}.{v.micro}",
+        "detail": f"Python {v.major}.{v.minor}.{v.micro}" + ("" if v.minor >= 11 else " (need 3.11+)"),
+    }
+
+    # ffmpeg
+    checks["ffmpeg"] = {
+        "ok": _shutil.which("ffmpeg") is not None,
+        "detail": "Installed" if _shutil.which("ffmpeg") else "Not found — needed for audio processing",
+    }
+
+    # API keys
+    openai_key = os.getenv("OPENAI_API_KEY", "")
+    has_openai = bool(openai_key and not openai_key.startswith("sk-your"))
+    elevenlabs_key = os.getenv("ELEVENLABS_API_KEY", "")
+    has_elevenlabs = bool(elevenlabs_key and elevenlabs_key != "your-elevenlabs-key-here")
+    checks["api_keys"] = {
+        "ok": has_openai,
+        "has_openai": has_openai,
+        "has_elevenlabs": has_elevenlabs,
+        "detail": ("OpenAI: configured" if has_openai else "OpenAI: NOT configured")
+                  + " | "
+                  + ("ElevenLabs: configured" if has_elevenlabs else "ElevenLabs: not configured (optional)"),
+    }
+
+    # Audio devices
+    try:
+        import sounddevice as sd
+        devices = sd.query_devices()
+        input_count = sum(1 for d in devices if d["max_input_channels"] > 0)
+        output_count = sum(1 for d in devices if d["max_output_channels"] > 0)
+        checks["audio"] = {
+            "ok": input_count > 0 and output_count > 0,
+            "inputs": input_count,
+            "outputs": output_count,
+            "detail": f"{input_count} input(s), {output_count} output(s)",
+        }
+    except Exception as e:
+        checks["audio"] = {
+            "ok": False,
+            "inputs": 0,
+            "outputs": 0,
+            "detail": f"Audio system error: {e}",
+        }
+
+    # Network (for AES67)
+    try:
+        import socket
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.connect(("8.8.8.8", 80))
+        local_ip = s.getsockname()[0]
+        s.close()
+        checks["network"] = {
+            "ok": True,
+            "ip": local_ip,
+            "detail": f"Network available ({local_ip})",
+        }
+    except Exception:
+        checks["network"] = {
+            "ok": False,
+            "ip": None,
+            "detail": "No network connection",
+        }
+
+    all_ok = all(c["ok"] for c in checks.values())
+    return web.json_response({"healthy": all_ok, "checks": checks})
+
+
 # ── WebSocket ───────────────────────────────────────────────────
 
 async def websocket_handler(request):
@@ -556,6 +881,11 @@ def create_app():
     app.router.add_post("/api/setup/test-openai", api_setup_test_openai)
     app.router.add_post("/api/setup/test-elevenlabs", api_setup_test_elevenlabs)
     app.router.add_post("/api/setup/save", api_setup_save)
+    # Live translation
+    app.router.add_post("/api/start-live", api_start_live)
+    app.router.add_post("/api/stop-live", api_stop_live)
+    # Health check
+    app.router.add_get("/api/health", api_health)
     # Static assets
     static_path = Path(__file__).parent / "static"
     if static_path.exists():

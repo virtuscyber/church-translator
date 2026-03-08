@@ -1,26 +1,62 @@
-# Church Live Translation 🎙️✝️
+# Church Live Translation
 
-Real-time Ukrainian → English translation for church services with biblical language styling. Audio flows from Dante network through AI translation and back to Dante.
+Real-time Ukrainian → English translation for church services with biblical language styling. Audio flows from microphone through AI translation and out to speakers or Dante network.
 
 ## How It Works
 
 ```
-Dante (Ukrainian audio) → Whisper STT → GPT-4o Translation → ElevenLabs TTS → Dante (English audio)
+Microphone (Ukrainian audio) → Whisper STT → GPT-4o Translation → ElevenLabs TTS → Speakers / Dante
 ```
 
-1. **Captures** the preacher's Ukrainian audio from Dante via virtual soundcard
+1. **Captures** the preacher's Ukrainian audio from a microphone or Dante virtual soundcard
 2. **Transcribes** using OpenAI's `gpt-4o-transcribe` (best Ukrainian accuracy)
 3. **Translates** Ukrainian → English with biblical vocabulary (GPT-4o + custom prompt)
 4. **Speaks** the English translation via ElevenLabs (warm, natural voice)
-5. **Outputs** back to Dante network for listeners' headphones/speakers
+5. **Outputs** to local speakers and/or Dante network for listeners' headphones
 
 **Expected latency: 10-15 seconds** | **Cost: ~$2-3/hour**
 
 ---
 
-## 🚀 Quick Start (Docker — Recommended)
+## Quick Start (Recommended)
 
-The fastest way to get running. You just need [Docker](https://docs.docker.com/get-docker/) installed.
+No Docker, no terminal commands. Any tech volunteer can do this.
+
+### 1. Download
+
+```
+git clone https://github.com/virtuscyber/church-translator.git
+```
+
+Or download and extract the ZIP from GitHub.
+
+### 2. Launch
+
+- **Windows:** Double-click `start.bat`
+- **macOS:** Double-click `start.command`
+- **Linux:** Double-click `start.sh` (or run `./start.sh`)
+
+The launcher automatically:
+- Checks that Python 3.11+ and ffmpeg are installed
+- Creates a virtual environment and installs dependencies (first time only)
+- Starts the dashboard and opens your browser
+
+### 3. Setup Wizard
+
+The browser opens to the dashboard. On first run, a setup wizard walks you through:
+- Entering your **OpenAI API key** (required)
+- Entering your **ElevenLabs API key** (optional — falls back to OpenAI TTS)
+- Choosing source and target languages
+
+### 4. Start Translating
+
+Click **Start Live Translation**, and the system begins listening, translating, and speaking in real time.
+
+---
+
+## Alternative: Docker
+
+If you prefer Docker:
 
 ```bash
 git clone https://github.com/virtuscyber/church-translator.git
@@ -28,12 +64,9 @@ cd church-translator
 docker compose up -d
 ```
 
-Open **http://localhost:8085** in your browser. The setup wizard will walk you through entering your API keys.
-
-**That's it!** Your data (API keys, config, recordings) persists across restarts.
+Open **http://localhost:8085** in your browser. The setup wizard handles configuration.
 
 ```bash
-# Useful commands
 docker compose logs -f          # Watch logs
 docker compose down             # Stop
 docker compose up -d --build    # Rebuild after updates
@@ -41,57 +74,35 @@ docker compose up -d --build    # Rebuild after updates
 
 ---
 
-## 📦 One-Line Install Script
+## One-Line Install Script
 
-For a native install (no Docker), run:
+For a native install on a fresh machine:
 
 ```bash
 curl -sL https://raw.githubusercontent.com/virtuscyber/church-translator/main/install.sh | bash
 ```
 
-Or with Docker:
-
-```bash
-curl -sL https://raw.githubusercontent.com/virtuscyber/church-translator/main/install.sh | bash -s -- --docker
-```
-
-The script will:
-- Detect your OS (macOS, Ubuntu/Debian, Fedora, Arch)
-- Install Python 3.11+, ffmpeg, and other prerequisites
-- Clone the repo, create a virtualenv, install dependencies
-- Optionally set up auto-start (systemd on Linux)
+The script detects your OS (macOS, Ubuntu/Debian, Fedora, Arch), installs prerequisites, and sets everything up.
 
 ---
 
-## 🔧 Manual Install
+## Prerequisites
 
-### Prerequisites
+- **Python 3.11+** — [Download](https://www.python.org/downloads/)
+- **ffmpeg** — for audio processing
+  - macOS: `brew install ffmpeg`
+  - Ubuntu/Debian: `sudo apt install ffmpeg`
+  - Windows: [Download](https://ffmpeg.org/download.html) and add to PATH
+- **OpenAI API key** — [Get one](https://platform.openai.com/api-keys)
+- **ElevenLabs API key** (optional) — [Get one](https://elevenlabs.io/)
 
-- Python 3.11+
-- ffmpeg
-- OpenAI API key
-- ElevenLabs API key
-- [Dante Via](https://www.getdante.com/products/software-essentials/dante-via/) ($50) or Dante Virtual Soundcard ($30) *(for Dante audio routing)*
-
-### Setup
-
-```bash
-git clone https://github.com/virtuscyber/church-translator.git
-cd church-translator
-
-python3 -m venv venv
-source venv/bin/activate
-pip install -r requirements.txt
-
-# Start the dashboard
-python dashboard/server.py
-```
-
-Open **http://localhost:8085** — the setup wizard handles API key configuration.
+The dashboard shows a health check panel on load — it tells you exactly what's missing and how to fix it.
 
 ---
 
-## ⛪ Dante Configuration
+## Dante / AES67 Configuration
+
+For network audio output to Dante:
 
 1. Open **Dante Controller** on the network
 2. Route the preacher's microphone channel to Dante Via on the translation PC
@@ -99,18 +110,21 @@ Open **http://localhost:8085** — the setup wizard handles API key configuratio
 4. Route the app's output back through Dante Via to the translation output channel
 5. Connect translation output to listener headphones/speakers in Dante Controller
 
+Set `output.mode` to `"dante"` or `"both"` in `config.yaml` to enable AES67 multicast output.
+
 ## Configuration
 
 Edit `config.yaml`:
 
 | Setting | Default | Description |
 |---------|---------|-------------|
-| `audio.input_device` | system default | Dante input device name or index |
-| `audio.output_device` | system default | Dante output device name or index |
+| `audio.input_device` | system default | Input device name or index |
+| `audio.output_device` | system default | Output device name or index |
 | `audio.chunk_duration_sec` | 8 | Seconds of audio per processing chunk |
 | `transcription.model` | gpt-4o-transcribe | OpenAI STT model |
 | `translation.model` | gpt-4o | Translation model |
 | `synthesis.provider` | elevenlabs | "elevenlabs" or "openai" |
+| `output.mode` | sounddevice | "sounddevice", "dante", or "both" |
 
 ## Biblical Language
 
