@@ -651,6 +651,21 @@
             </div>
         </div>
 
+        <!-- Multi-Language Output -->
+        <div class="form-group" style="border:1px solid var(--border);border-radius:8px;padding:12px;margin-top:8px;">
+            <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px;">
+                <label style="margin:0;cursor:pointer;" for="multiLangToggle">🌍 Multi-Language Output</label>
+                <input type="checkbox" id="multiLangToggle" onchange="toggleMultiLang()">
+            </div>
+            <div id="multiLangPanel" style="display:none;">
+                <div style="font-size:0.8em;color:var(--text-dim);margin-bottom:8px;">
+                    Translate to multiple languages simultaneously. Each language gets its own AES67/Dante stream.
+                </div>
+                <div id="multiLangCheckboxes" style="display:flex;flex-wrap:wrap;gap:6px;"></div>
+                <div id="multiLangInfo" style="font-size:0.75em;color:var(--accent);margin-top:6px;"></div>
+            </div>
+        </div>
+
         <!-- Model Selection -->
         <div class="form-row">
             <div class="form-group">
@@ -919,6 +934,67 @@
         });
     }
 
+    // ── Multi-Language Output ─────────────────────────
+    function toggleMultiLang() {
+        const on = document.getElementById('multiLangToggle').checked;
+        document.getElementById('multiLangPanel').style.display = on ? 'block' : 'none';
+        if (on) populateMultiLangCheckboxes();
+        updateMultiLangInfo();
+    }
+
+    function populateMultiLangCheckboxes() {
+        const container = document.getElementById('multiLangCheckboxes');
+        if (container.children.length > 0) return; // already populated
+        const srcLang = document.getElementById('sourceLang').value;
+        const langs = [
+            {code: 'en', name: 'English', flag: '🇬🇧'},
+            {code: 'ru', name: 'Russian', flag: '🇷🇺'},
+            {code: 'pl', name: 'Polish', flag: '🇵🇱'},
+            {code: 'es', name: 'Spanish', flag: '🇪🇸'},
+            {code: 'fr', name: 'French', flag: '🇫🇷'},
+            {code: 'de', name: 'German', flag: '🇩🇪'},
+            {code: 'pt', name: 'Portuguese', flag: '🇵🇹'},
+            {code: 'ko', name: 'Korean', flag: '🇰🇷'},
+            {code: 'zh', name: 'Mandarin', flag: '🇨🇳'},
+            {code: 'ar', name: 'Arabic', flag: '🇸🇦'},
+            {code: 'uk', name: 'Ukrainian', flag: '🇺🇦'},
+            {code: 'ro', name: 'Romanian', flag: '🇷🇴'},
+        ].filter(l => l.code !== srcLang);
+
+        container.innerHTML = '';
+        langs.forEach(l => {
+            const label = document.createElement('label');
+            label.style.cssText = 'display:flex;align-items:center;gap:4px;padding:4px 10px;border:1px solid var(--border);border-radius:6px;cursor:pointer;font-size:0.85em;';
+            const cb = document.createElement('input');
+            cb.type = 'checkbox';
+            cb.value = l.code;
+            cb.className = 'multiLangCb';
+            cb.addEventListener('change', updateMultiLangInfo);
+            label.appendChild(cb);
+            label.appendChild(document.createTextNode(`${l.flag} ${l.name}`));
+            container.appendChild(label);
+        });
+    }
+
+    function getSelectedTargetLangs() {
+        return Array.from(document.querySelectorAll('.multiLangCb:checked')).map(cb => cb.value);
+    }
+
+    function updateMultiLangInfo() {
+        const info = document.getElementById('multiLangInfo');
+        if (!document.getElementById('multiLangToggle').checked) {
+            info.textContent = '';
+            return;
+        }
+        const selected = getSelectedTargetLangs();
+        if (selected.length === 0) {
+            info.textContent = 'Select at least one target language.';
+        } else {
+            const streamNames = selected.map(l => `"Church Translation ${l.toUpperCase()}"`).join(', ');
+            info.textContent = `${selected.length} output stream${selected.length > 1 ? 's' : ''}: ${streamNames}`;
+        }
+    }
+
     // ── Model Selection Notes ─────────────────────────
     const modelNotes = {
         stt: {
@@ -1044,6 +1120,17 @@
                 document.getElementById('voiceSelect').value = cfg.elevenlabs_voice_id;
                 updateVoiceInfo();
             }
+            if (cfg.multi_language_mode) {
+                document.getElementById('multiLangToggle').checked = true;
+                toggleMultiLang();
+                if (cfg.target_languages && cfg.target_languages.length) {
+                    cfg.target_languages.forEach(lc => {
+                        const cb = document.querySelector(`.multiLangCb[value="${lc}"]`);
+                        if (cb) cb.checked = true;
+                    });
+                    updateMultiLangInfo();
+                }
+            }
             if (cfg.stt_model) {
                 document.getElementById('sttModel').value = cfg.stt_model;
                 updateModelNote('sttModel', 'sttNote', 'stt');
@@ -1084,6 +1171,10 @@
             stt_model: document.getElementById('sttModel').value,
             translation_model: document.getElementById('translationModel').value,
             tts_model: document.getElementById('ttsModel').value,
+            multi_language_mode: document.getElementById('multiLangToggle').checked,
+            target_languages: document.getElementById('multiLangToggle').checked
+                ? getSelectedTargetLangs()
+                : [document.getElementById('targetLang').value],
         };
         try {
             await fetch('/api/config', {
