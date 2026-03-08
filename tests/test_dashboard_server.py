@@ -103,6 +103,42 @@ async def test_settings_round_trip_uses_alias_routes():
 
 
 @pytest.mark.asyncio
+async def test_settings_round_trip_preserves_multi_language_model_fields():
+    from dashboard import server
+
+    save = await server.api_save_config(
+        DummyRequest(
+            "/api/settings",
+            data={
+                "source_language": "uk",
+                "target_language": "en",
+                "target_languages": ["en", "ru", "pl"],
+                "stt_model": "gpt-4o-transcribe",
+                "translation_model": "gpt-4o",
+                "tts_model": "eleven_turbo_v2_5",
+                "multi_language_mode": True,
+            },
+        )
+    )
+
+    assert save.status == 200
+    assert decode_json_response(save) == {"ok": True}
+
+    loaded = await server.api_get_config(DummyRequest("/api/settings"))
+
+    assert loaded.status == 200
+    assert decode_json_response(loaded) == {
+        "source_language": "uk",
+        "target_language": "en",
+        "target_languages": ["en", "ru", "pl"],
+        "stt_model": "gpt-4o-transcribe",
+        "translation_model": "gpt-4o",
+        "tts_model": "eleven_turbo_v2_5",
+        "multi_language_mode": True,
+    }
+
+
+@pytest.mark.asyncio
 async def test_live_start_and_stop_are_graceful_without_real_services(monkeypatch):
     from dashboard import server
 
