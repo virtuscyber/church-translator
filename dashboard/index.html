@@ -651,6 +651,16 @@
             </div>
         </div>
 
+        <!-- Voice Selection -->
+        <div class="form-group">
+            <label>🎙️ Voice (ElevenLabs)</label>
+            <div style="display:flex;gap:8px;align-items:center;">
+                <select id="voiceSelect" style="flex:1;"><option value="">Loading voices...</option></select>
+                <button class="btn btn-secondary btn-sm" onclick="previewVoice()" title="Preview selected voice">▶️ Preview</button>
+            </div>
+            <div id="voiceInfo" style="font-size:0.8em;color:var(--text-dim);margin-top:4px;"></div>
+        </div>
+
         <!-- Custom Vocabulary -->
         <div class="form-group">
             <label>Custom Vocabulary & Terms (church names, biblical terms, etc.)</label>
@@ -820,7 +830,7 @@
     // ── Init ──────────────────────────────────────
     connectWS();
     loadDevices();
-    loadConfig();
+    loadVoices().then(() => loadConfig());
     populateLanguageDropdowns();
     checkSetupStatus();
     loadHealthChecks();
@@ -875,6 +885,70 @@
         });
     }
 
+    // ── Voice Selection ─────────────────────────────
+    let voicesData = [];
+    let voicePreviewAudio = null;
+
+    async function loadVoices() {
+        const sel = document.getElementById('voiceSelect');
+        try {
+            const res = await fetch('/api/voices');
+            const data = await res.json();
+            voicesData = data.voices || [];
+            if (voicesData.length === 0) {
+                sel.innerHTML = '<option value="">No voices available (check ElevenLabs key)</option>';
+                document.getElementById('voiceInfo').textContent = data.error || '';
+                return;
+            }
+            sel.innerHTML = '';
+            voicesData.forEach(v => {
+                const opt = document.createElement('option');
+                opt.value = v.voice_id;
+                const cat = v.category ? ` (${v.category})` : '';
+                opt.textContent = v.name + cat;
+                sel.appendChild(opt);
+            });
+            sel.addEventListener('change', updateVoiceInfo);
+            updateVoiceInfo();
+        } catch (e) {
+            sel.innerHTML = '<option value="">Failed to load voices</option>';
+        }
+    }
+
+    function updateVoiceInfo() {
+        const sel = document.getElementById('voiceSelect');
+        const voice = voicesData.find(v => v.voice_id === sel.value);
+        const info = document.getElementById('voiceInfo');
+        if (voice) {
+            const labels = voice.labels || {};
+            const parts = [];
+            if (labels.gender) parts.push(labels.gender);
+            if (labels.age) parts.push(labels.age);
+            if (labels.accent) parts.push(labels.accent + ' accent');
+            if (labels.use_case) parts.push(labels.use_case);
+            if (voice.description) parts.push(voice.description);
+            info.textContent = parts.join(' · ') || '';
+        } else {
+            info.textContent = '';
+        }
+    }
+
+    function previewVoice() {
+        const sel = document.getElementById('voiceSelect');
+        const voice = voicesData.find(v => v.voice_id === sel.value);
+        if (!voice || !voice.preview_url) {
+            showToast('No preview available for this voice');
+            return;
+        }
+        // Stop any playing preview
+        if (voicePreviewAudio) {
+            voicePreviewAudio.pause();
+            voicePreviewAudio = null;
+        }
+        voicePreviewAudio = new Audio(voice.preview_url);
+        voicePreviewAudio.play().catch(() => showToast('❌ Could not play preview'));
+    }
+
     async function loadConfig() {
         try {
             const res = await fetch('/api/config');
@@ -895,6 +969,10 @@
             }
             if (cfg.custom_vocabulary) {
                 document.getElementById('customVocab').value = cfg.custom_vocabulary;
+            }
+            if (cfg.elevenlabs_voice_id) {
+                document.getElementById('voiceSelect').value = cfg.elevenlabs_voice_id;
+                updateVoiceInfo();
             }
             updateLangPairLabel();
         } catch (e) {
@@ -920,6 +998,7 @@
             source_language: document.getElementById('sourceLang').value,
             target_language: document.getElementById('targetLang').value,
             custom_vocabulary: document.getElementById('customVocab').value,
+            elevenlabs_voice_id: document.getElementById('voiceSelect').value || null,
         };
         try {
             await fetch('/api/config', {
