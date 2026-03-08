@@ -29,3 +29,10 @@ pipeline:
   overlap_sec: 1.0            # Overlap between chunks for context
   buffer_silence_sec: 2.0     # Flush buffer after this much silence
   context_sentences: 2        # Previous sentences sent for translation continuity
+
+output:
+  mode: "sounddevice"         # "sounddevice", "dante", or "both"
+  stream_name: "Church Translation EN"
+  multicast_address: "239.69.0.1"
+  port: 5004
+  ttl: 32

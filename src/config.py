@@ -63,6 +63,15 @@ class SynthesisConfig:
 
 
 @dataclass
+class OutputConfig:
+    mode: str = "sounddevice"  # "sounddevice", "dante", or "both"
+    stream_name: str = "Church Translation EN"
+    multicast_address: str = "239.69.0.1"
+    port: int = 5004
+    ttl: int = 32
+
+
+@dataclass
 class PipelineConfig:
     overlap_sec: float = 1.0
     buffer_silence_sec: float = 2.0
@@ -82,6 +91,7 @@ class Config:
     translation: TranslationConfig = field(default_factory=TranslationConfig)
     synthesis: SynthesisConfig = field(default_factory=SynthesisConfig)
     pipeline: PipelineConfig = field(default_factory=PipelineConfig)
+    output: OutputConfig = field(default_factory=OutputConfig)
 
     openai_api_key: str = ""
     elevenlabs_api_key: str = ""
@@ -129,6 +139,11 @@ def load_config(config_path: str = "config.yaml") -> Config:
             for k, v in raw["pipeline"].items():
                 if hasattr(cfg.pipeline, k):
                     setattr(cfg.pipeline, k, v)
+
+        if "output" in raw:
+            for k, v in raw["output"].items():
+                if hasattr(cfg.output, k):
+                    setattr(cfg.output, k, v)
 
     cfg.openai_api_key = os.getenv("OPENAI_API_KEY", "")
     cfg.elevenlabs_api_key = os.getenv("ELEVENLABS_API_KEY", "")
