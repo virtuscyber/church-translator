@@ -114,12 +114,26 @@ class StreamingPipeline:
             openai_model=config.synthesis.openai.model,
             openai_voice=config.synthesis.openai.voice,
         )
-        from .audio_playback import AudioPlayback
-        self.playback = AudioPlayback(
-            device=config.audio.output_device,
-            sample_rate=24000,
-            channels=1,
-        )
+        self._output_mode = config.output.mode
+        self.playback = None
+        self.aes67 = None
+
+        if self._output_mode in ("sounddevice", "both"):
+            from .audio_playback import AudioPlayback
+            self.playback = AudioPlayback(
+                device=config.audio.output_device,
+                sample_rate=24000,
+                channels=1,
+            )
+
+        if self._output_mode in ("dante", "both"):
+            from .aes67_output import AES67Sender
+            self.aes67 = AES67Sender(
+                stream_name=config.output.stream_name,
+                multicast_addr=config.output.multicast_address,
+                port=config.output.port,
+                ttl=config.output.ttl,
+            )
 
         # Stats
         self._chunks_processed = 0
@@ -136,6 +150,8 @@ class StreamingPipeline:
 
         self._running = True
         self._pipeline_start_time = time.monotonic()
+        if self.aes67:
+            self.aes67.start()
         await self.capture.start()
 
         # Launch all workers concurrently
@@ -170,6 +186,8 @@ class StreamingPipeline:
     async def stop(self):
         """Stop the streaming pipeline gracefully."""
         self._running = False
+        if self.aes67:
+            self.aes67.stop()
         await self.capture.stop()
 
         # Send poison pills to drain queues
@@ -193,6 +211,16 @@ class StreamingPipeline:
                 time.monotonic() - self._pipeline_start_time,
             )
         logger.info("Streaming pipeline stopped.")
+
+    async def _play_audio(self, audio_bytes: bytes):
+        """Play audio through configured output(s)."""
+        tasks = []
+        if self.playback:
+            tasks.append(self.playback.play(audio_bytes))
+        if self.aes67:
+            tasks.append(self.aes67.play(audio_bytes))
+        if tasks:
+            await asyncio.gather(*tasks)
 
     # ── Workers ──────────────────────────────────────────────────
 
@@ -329,7 +357,7 @@ class StreamingPipeline:
                             c = buffer.pop(next_seq)
                             next_seq += 1
                             if c.audio_bytes:
-                                await self.playback.play(c.audio_bytes)
+                                await self._play_audio(c.audio_bytes)
                         break
                     buffer[chunk.seq] = chunk
                 except asyncio.QueueEmpty:
@@ -341,7 +369,7 @@ class StreamingPipeline:
                 next_seq += 1
                 
                 if c.audio_bytes:
-                    await self.playback.play(c.audio_bytes)
+                    await self._play_audio(c.audio_bytes)
                     c.t_played = time.monotonic()
                     
                     # Stats

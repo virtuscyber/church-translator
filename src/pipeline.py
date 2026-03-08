@@ -74,11 +74,25 @@ class TranslationPipeline:
         )
 
         # Output at 24kHz for ElevenLabs PCM, 24kHz for OpenAI PCM
-        self.playback = AudioPlayback(
-            device=config.audio.output_device,
-            sample_rate=24000,
-            channels=1,
-        )
+        self._output_mode = config.output.mode
+        self.playback = None
+        self.aes67 = None
+
+        if self._output_mode in ("sounddevice", "both"):
+            self.playback = AudioPlayback(
+                device=config.audio.output_device,
+                sample_rate=24000,
+                channels=1,
+            )
+
+        if self._output_mode in ("dante", "both"):
+            from .aes67_output import AES67Sender
+            self.aes67 = AES67Sender(
+                stream_name=config.output.stream_name,
+                multicast_addr=config.output.multicast_address,
+                port=config.output.port,
+                ttl=config.output.ttl,
+            )
 
         # Stats
         self._chunks_processed = 0
@@ -92,6 +106,8 @@ class TranslationPipeline:
         logger.info("=" * 60)
 
         self._running = True
+        if self.aes67:
+            self.aes67.start()
         await self.capture.start()
 
         try:
@@ -105,6 +121,8 @@ class TranslationPipeline:
     async def stop(self):
         """Stop the pipeline gracefully."""
         self._running = False
+        if self.aes67:
+            self.aes67.stop()
         await self.capture.stop()
         
         if self._chunks_processed > 0:
@@ -152,7 +170,13 @@ class TranslationPipeline:
         t_tts = time.monotonic()
 
         # 5. Play translated audio
-        await self.playback.play(audio_bytes)
+        play_tasks = []
+        if self.playback:
+            play_tasks.append(self.playback.play(audio_bytes))
+        if self.aes67:
+            play_tasks.append(self.aes67.play(audio_bytes))
+        if play_tasks:
+            await asyncio.gather(*play_tasks)
 
         t_done = time.monotonic()
 
