@@ -257,7 +257,7 @@ async def api_save_config(request):
     """Save device/language config."""
     data = await request.json()
     # Only allow safe keys
-    allowed = {"input_device", "output_device", "source_language", "target_language", "custom_vocabulary", "elevenlabs_voice_id"}
+    allowed = {"input_device", "output_device", "source_language", "target_language", "custom_vocabulary", "elevenlabs_voice_id", "stt_model", "translation_model", "tts_model"}
     filtered = {k: v for k, v in data.items() if k in allowed}
     save_config(filtered)
     return web.json_response({"ok": True})
@@ -657,6 +657,17 @@ async def _run_live_pipeline():
         if saved_voice_id:
             config.synthesis.elevenlabs.voice_id = saved_voice_id
 
+        # Override models from saved config
+        saved_stt_model = saved.get("stt_model")
+        if saved_stt_model:
+            config.transcription.model = saved_stt_model
+        saved_translation_model = saved.get("translation_model")
+        if saved_translation_model:
+            config.translation.model = saved_translation_model
+        saved_tts_model = saved.get("tts_model")
+        if saved_tts_model:
+            config.synthesis.elevenlabs.model = saved_tts_model
+
         # Initialize components
         capture = VADAudioCapture(
             device=config.audio.input_device,
@@ -730,27 +741,41 @@ async def _run_live_pipeline():
         total_latency = 0.0
         chunk_count = 0
 
-        while state.live_running:
-            try:
-                wav_bytes = await capture.get_chunk()
-            except Exception:
-                if not state.live_running:
-                    break
-                continue
-            if wav_bytes is None:
-                continue
+        # Playback queue — TTS audio is played in order but doesn't block the pipeline
+        playback_queue = asyncio.Queue()
+        playback_active = True
 
+        async def _playback_worker():
+            """Plays TTS audio in order without blocking the main processing loop."""
+            while playback_active or not playback_queue.empty():
+                try:
+                    audio_bytes = await asyncio.wait_for(playback_queue.get(), timeout=0.5)
+                    if audio_bytes is None:
+                        break
+                    play_tasks = [playback.play(audio_bytes)]
+                    if aes67:
+                        play_tasks.append(aes67.play(audio_bytes))
+                    await asyncio.gather(*play_tasks)
+                except asyncio.TimeoutError:
+                    continue
+                except Exception as e:
+                    logger.warning("Playback error: %s", e)
+
+        playback_task = asyncio.create_task(_playback_worker())
+
+        async def _process_chunk(wav_bytes, seq):
+            """Process a single chunk: STT → Translate → TTS (queued)."""
+            nonlocal total_latency
             t0 = time.time()
 
             # STT
             src_text = await transcriber.transcribe(wav_bytes)
             if not src_text:
-                continue
+                return
 
-            chunk_count += 1
             await broadcast({
                 "type": "stt",
-                "seq": chunk_count,
+                "seq": seq,
                 "total": 0,
                 "text": src_text,
             })
@@ -758,15 +783,15 @@ async def _run_live_pipeline():
             # Translate
             tgt_text = await translator.translate(src_text)
             if not tgt_text:
-                continue
+                return
 
             latency = time.time() - t0
             total_latency += latency
-            state.stats["chunks_processed"] = chunk_count
-            state.stats["avg_latency"] = total_latency / chunk_count
+            state.stats["chunks_processed"] = seq
+            state.stats["avg_latency"] = total_latency / seq
 
             entry = {
-                "seq": chunk_count,
+                "seq": seq,
                 "source": src_text,
                 "translated": tgt_text,
                 "source_lang": src_lang,
@@ -783,19 +808,50 @@ async def _run_live_pipeline():
                 "entry": entry,
                 "progress": 0,
                 "stats": {
-                    "chunks_processed": chunk_count,
+                    "chunks_processed": seq,
                     "total_chunks": 0,
                     "avg_latency": round(state.stats["avg_latency"], 1),
                 },
             })
 
-            # TTS + playback (don't block the loop for the next chunk)
+            # TTS — synthesize and queue for playback (non-blocking)
             audio_bytes = await synthesizer.synthesize(tgt_text)
             if audio_bytes:
-                play_tasks = [playback.play(audio_bytes)]
-                if aes67:
-                    play_tasks.append(aes67.play(audio_bytes))
-                await asyncio.gather(*play_tasks)
+                await playback_queue.put(audio_bytes)
+
+        # Main loop: capture overlaps with processing
+        # We process chunks concurrently (up to 2 at a time) so capture never stalls
+        processing_tasks = set()
+        MAX_CONCURRENT = 2
+
+        while state.live_running:
+            try:
+                wav_bytes = await capture.get_chunk()
+            except Exception:
+                if not state.live_running:
+                    break
+                continue
+            if wav_bytes is None:
+                continue
+
+            chunk_count += 1
+            task = asyncio.create_task(_process_chunk(wav_bytes, chunk_count))
+            processing_tasks.add(task)
+            task.add_done_callback(processing_tasks.discard)
+
+            # If at max concurrency, wait for one to finish before accepting next
+            if len(processing_tasks) >= MAX_CONCURRENT:
+                done, _ = await asyncio.wait(processing_tasks, return_when=asyncio.FIRST_COMPLETED)
+                processing_tasks -= done
+
+        # Wait for in-flight processing to finish
+        if processing_tasks:
+            await asyncio.gather(*processing_tasks, return_exceptions=True)
+
+        # Signal playback worker to stop after draining queue
+        playback_active = False
+        await playback_queue.put(None)
+        await playback_task
 
         # Cleanup
         await capture.stop()

@@ -651,14 +651,48 @@
             </div>
         </div>
 
-        <!-- Voice Selection -->
-        <div class="form-group">
-            <label>🎙️ Voice (ElevenLabs)</label>
+        <!-- Model Selection -->
+        <div class="form-row">
+            <div class="form-group">
+                <label>🧠 Speech-to-Text Model</label>
+                <select id="sttModel">
+                    <option value="gpt-4o-transcribe">gpt-4o-transcribe (Best accuracy, slower)</option>
+                    <option value="gpt-4o-mini-transcribe">gpt-4o-mini-transcribe (Fast, good accuracy)</option>
+                    <option value="whisper-1">whisper-1 (Fastest, basic accuracy)</option>
+                </select>
+                <div class="model-note" id="sttNote" style="font-size:0.75em;color:var(--text-dim);margin-top:2px;"></div>
+            </div>
+            <div class="form-group">
+                <label>🌐 Translation Model</label>
+                <select id="translationModel">
+                    <option value="gpt-4o">gpt-4o (Best quality, slower)</option>
+                    <option value="gpt-4o-mini">gpt-4o-mini (3x faster, slightly less nuanced)</option>
+                    <option value="gpt-4.1-mini">gpt-4.1-mini (Latest fast model)</option>
+                    <option value="gpt-4.1-nano">gpt-4.1-nano (Fastest, basic translations)</option>
+                </select>
+                <div class="model-note" id="translationNote" style="font-size:0.75em;color:var(--text-dim);margin-top:2px;"></div>
+            </div>
+        </div>
+
+        <div class="form-row">
+            <div class="form-group">
+                <label>🔊 TTS Model (ElevenLabs)</label>
+                <select id="ttsModel">
+                    <option value="eleven_turbo_v2_5">Turbo v2.5 (Fastest, low latency)</option>
+                    <option value="eleven_multilingual_v2">Multilingual v2 (Best quality, slower)</option>
+                    <option value="eleven_monolingual_v1">Monolingual v1 (English only, fast)</option>
+                    <option value="eleven_flash_v2_5">Flash v2.5 (Ultra-fast, good quality)</option>
+                </select>
+                <div class="model-note" id="ttsNote" style="font-size:0.75em;color:var(--text-dim);margin-top:2px;"></div>
+            </div>
+            <div class="form-group">
+                <label>🎙️ Voice (ElevenLabs)</label>
             <div style="display:flex;gap:8px;align-items:center;">
                 <select id="voiceSelect" style="flex:1;"><option value="">Loading voices...</option></select>
                 <button class="btn btn-secondary btn-sm" onclick="previewVoice()" title="Preview selected voice">▶️ Preview</button>
             </div>
             <div id="voiceInfo" style="font-size:0.8em;color:var(--text-dim);margin-top:4px;"></div>
+            </div>
         </div>
 
         <!-- Custom Vocabulary -->
@@ -885,6 +919,42 @@
         });
     }
 
+    // ── Model Selection Notes ─────────────────────────
+    const modelNotes = {
+        stt: {
+            'gpt-4o-transcribe': '🎯 Best Ukrainian accuracy. ~2-4s per chunk.',
+            'gpt-4o-mini-transcribe': '⚡ 2x faster. Good for most speech. ~1-2s per chunk.',
+            'whisper-1': '🚀 Fastest but less accurate on Ukrainian dialects. ~0.5-1s.',
+        },
+        translation: {
+            'gpt-4o': '🎯 Best biblical vocabulary and nuance. ~1-3s per chunk.',
+            'gpt-4o-mini': '⚡ 3x faster, slightly less nuanced. ~0.5-1s. Recommended.',
+            'gpt-4.1-mini': '⚡ Latest fast model. Good quality + speed balance.',
+            'gpt-4.1-nano': '🚀 Ultra-fast. Basic translations, may miss biblical tone.',
+        },
+        tts: {
+            'eleven_turbo_v2_5': '⚡ Best speed/quality balance. ~0.5s latency. Recommended.',
+            'eleven_multilingual_v2': '🎯 Highest quality. Better for accented speech. ~1-2s.',
+            'eleven_monolingual_v1': '🚀 Fast, English only. Good for simple output.',
+            'eleven_flash_v2_5': '🚀 Ultra-fast generation. Slight quality tradeoff.',
+        },
+    };
+
+    function updateModelNote(selectId, noteId, category) {
+        const val = document.getElementById(selectId).value;
+        const note = modelNotes[category]?.[val] || '';
+        document.getElementById(noteId).textContent = note;
+    }
+
+    document.getElementById('sttModel').addEventListener('change', () => updateModelNote('sttModel', 'sttNote', 'stt'));
+    document.getElementById('translationModel').addEventListener('change', () => updateModelNote('translationModel', 'translationNote', 'translation'));
+    document.getElementById('ttsModel').addEventListener('change', () => updateModelNote('ttsModel', 'ttsNote', 'tts'));
+
+    // Set initial notes
+    updateModelNote('sttModel', 'sttNote', 'stt');
+    updateModelNote('translationModel', 'translationNote', 'translation');
+    updateModelNote('ttsModel', 'ttsNote', 'tts');
+
     // ── Voice Selection ─────────────────────────────
     let voicesData = [];
     let voicePreviewAudio = null;
@@ -974,6 +1044,18 @@
                 document.getElementById('voiceSelect').value = cfg.elevenlabs_voice_id;
                 updateVoiceInfo();
             }
+            if (cfg.stt_model) {
+                document.getElementById('sttModel').value = cfg.stt_model;
+                updateModelNote('sttModel', 'sttNote', 'stt');
+            }
+            if (cfg.translation_model) {
+                document.getElementById('translationModel').value = cfg.translation_model;
+                updateModelNote('translationModel', 'translationNote', 'translation');
+            }
+            if (cfg.tts_model) {
+                document.getElementById('ttsModel').value = cfg.tts_model;
+                updateModelNote('ttsModel', 'ttsNote', 'tts');
+            }
             updateLangPairLabel();
         } catch (e) {
             console.error('Failed to load config:', e);
@@ -999,6 +1081,9 @@
             target_language: document.getElementById('targetLang').value,
             custom_vocabulary: document.getElementById('customVocab').value,
             elevenlabs_voice_id: document.getElementById('voiceSelect').value || null,
+            stt_model: document.getElementById('sttModel').value,
+            translation_model: document.getElementById('translationModel').value,
+            tts_model: document.getElementById('ttsModel').value,
         };
         try {
             await fetch('/api/config', {
