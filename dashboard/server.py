@@ -257,7 +257,7 @@ async def api_save_config(request):
     """Save device/language config."""
     data = await request.json()
     # Only allow safe keys
-    allowed = {"input_device", "output_device", "source_language", "target_language", "custom_vocabulary"}
+    allowed = {"input_device", "output_device", "source_language", "target_language", "custom_vocabulary", "elevenlabs_voice_id"}
     filtered = {k: v for k, v in data.items() if k in allowed}
     save_config(filtered)
     return web.json_response({"ok": True})
@@ -266,6 +266,45 @@ async def api_save_config(request):
 async def api_languages(request):
     """List supported languages."""
     return web.json_response({"languages": SUPPORTED_LANGUAGES})
+
+
+# ── Voice Selection API ────────────────────────────────────────
+
+async def api_voices(request):
+    """List available ElevenLabs voices."""
+    from dotenv import load_dotenv
+    load_dotenv(PROJECT_ROOT / ".env", override=True)
+    api_key = os.getenv("ELEVENLABS_API_KEY", "")
+    if not api_key or api_key.startswith("your-"):
+        return web.json_response({"voices": [], "error": "ElevenLabs API key not configured"})
+
+    try:
+        import aiohttp as _aiohttp
+        async with _aiohttp.ClientSession() as session:
+            async with session.get(
+                "https://api.elevenlabs.io/v1/voices",
+                headers={"xi-api-key": api_key},
+                timeout=_aiohttp.ClientTimeout(total=10),
+            ) as resp:
+                if resp.status != 200:
+                    return web.json_response({"voices": [], "error": f"ElevenLabs API error: {resp.status}"})
+                data = await resp.json()
+                voices = []
+                for v in data.get("voices", []):
+                    voices.append({
+                        "voice_id": v["voice_id"],
+                        "name": v["name"],
+                        "category": v.get("category", ""),
+                        "description": v.get("description", ""),
+                        "preview_url": v.get("preview_url", ""),
+                        "labels": v.get("labels", {}),
+                    })
+                # Sort: premade first, then alphabetical
+                voices.sort(key=lambda x: (0 if x["category"] == "premade" else 1, x["name"]))
+                return web.json_response({"voices": voices})
+    except Exception as e:
+        logger.error("Failed to fetch voices: %s", e)
+        return web.json_response({"voices": [], "error": str(e)})
 
 
 # ── Feature 3: Setup Wizard API ────────────────────────────────
@@ -613,6 +652,11 @@ async def _run_live_pipeline():
         if output_dev is not None and output_dev != "":
             config.audio.output_device = int(output_dev)
 
+        # Override ElevenLabs voice if user selected one
+        saved_voice_id = saved.get("elevenlabs_voice_id")
+        if saved_voice_id:
+            config.synthesis.elevenlabs.voice_id = saved_voice_id
+
         # Initialize components
         capture = VADAudioCapture(
             device=config.audio.input_device,
@@ -920,6 +964,7 @@ def create_app():
     app.router.add_get("/api/settings", api_get_config)
     app.router.add_post("/api/settings", api_save_config)
     app.router.add_get("/api/languages", api_languages)
+    app.router.add_get("/api/voices", api_voices)
     # Feature 3: Setup wizard
     app.router.add_get("/api/setup/status", api_setup_status)
     app.router.add_post("/api/setup/test-openai", api_setup_test_openai)
