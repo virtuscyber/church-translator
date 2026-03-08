@@ -245,6 +245,116 @@ async def api_test_output(request):
         return web.json_response({"ok": False, "error": str(e)}, status=500)
 
 
+# ── Audio Level Monitor ────────────────────────────────────────
+
+async def api_audio_levels(request):
+    """Sample audio levels from all input devices simultaneously.
+
+    Returns a JSON array of {index, name, level_db, level_pct, has_audio}.
+    Samples each device for ~200ms. Devices with audio show higher levels.
+    """
+    try:
+        import sounddevice as sd
+        import numpy as np
+
+        devices = sd.query_devices()
+        input_devices = []
+        for i, dev in enumerate(devices):
+            if dev["max_input_channels"] > 0:
+                input_devices.append({"index": i, "name": dev["name"], "sr": dev["default_samplerate"]})
+
+        results = []
+        loop = asyncio.get_running_loop()
+
+        def _sample_device(dev_index, sr):
+            """Record a short sample from one device and return its peak level."""
+            try:
+                sr_int = int(sr)
+                duration = 0.2  # 200ms sample
+                frames = int(sr_int * duration)
+                recording = sd.rec(frames, samplerate=sr_int, channels=1, dtype="float32", device=dev_index)
+                sd.wait()
+                if recording is None or len(recording) == 0:
+                    return -100.0
+                peak = float(np.max(np.abs(recording)))
+                if peak < 1e-10:
+                    return -100.0
+                return float(20 * np.log10(peak))
+            except Exception:
+                return None  # Device error
+
+        for dev in input_devices:
+            level_db = await loop.run_in_executor(None, _sample_device, dev["index"], dev["sr"])
+            if level_db is None:
+                results.append({
+                    "index": dev["index"],
+                    "name": dev["name"],
+                    "level_db": None,
+                    "level_pct": 0,
+                    "has_audio": False,
+                    "error": True,
+                })
+            else:
+                # Convert dB to percentage (0-100). -60dB = silence, 0dB = full scale
+                pct = max(0, min(100, int((level_db + 60) / 60 * 100)))
+                results.append({
+                    "index": dev["index"],
+                    "name": dev["name"],
+                    "level_db": round(level_db, 1),
+                    "level_pct": pct,
+                    "has_audio": level_db > -40,  # Above -40dB = likely has audio
+                })
+
+        return web.json_response({"devices": results})
+    except ImportError:
+        return web.json_response({"devices": [], "error": "sounddevice not installed"})
+    except Exception as e:
+        return web.json_response({"devices": [], "error": str(e)})
+
+
+async def api_audio_level_single(request):
+    """Get audio level for a single device (faster, for continuous monitoring)."""
+    try:
+        import sounddevice as sd
+        import numpy as np
+
+        data = await request.json()
+        dev_index = data.get("device_index")
+        if dev_index is None:
+            return web.json_response({"error": "device_index required"}, status=400)
+
+        dev_index = int(dev_index)
+        dev_info = sd.query_devices(dev_index)
+        sr = int(dev_info["default_samplerate"])
+
+        loop = asyncio.get_running_loop()
+
+        def _sample():
+            frames = int(sr * 0.1)  # 100ms for faster response
+            recording = sd.rec(frames, samplerate=sr, channels=1, dtype="float32", device=dev_index)
+            sd.wait()
+            if recording is None or len(recording) == 0:
+                return -100.0, 0.0
+            peak = float(np.max(np.abs(recording)))
+            rms = float(np.sqrt(np.mean(recording ** 2)))
+            peak_db = 20 * np.log10(peak) if peak > 1e-10 else -100.0
+            rms_db = 20 * np.log10(rms) if rms > 1e-10 else -100.0
+            return peak_db, rms_db
+
+        peak_db, rms_db = await loop.run_in_executor(None, _sample)
+        pct = max(0, min(100, int((peak_db + 60) / 60 * 100)))
+
+        return web.json_response({
+            "index": dev_index,
+            "peak_db": round(peak_db, 1),
+            "rms_db": round(rms_db, 1),
+            "level_pct": pct,
+            "has_audio": peak_db > -40,
+        })
+    except Exception as e:
+        return web.json_response({"error": str(e)}, status=500)
+
+
 # ── Feature 1 & 2: Config API ──────────────────────────────────
 
 async def api_get_config(request):
@@ -1014,6 +1124,8 @@ def create_app():
     # Feature 1: Audio devices
     app.router.add_get("/api/devices", api_devices)
     app.router.add_post("/api/test-output", api_test_output)
+    app.router.add_get("/api/audio-levels", api_audio_levels)
+    app.router.add_post("/api/audio-level", api_audio_level_single)
     # Feature 1 & 2: Config
     app.router.add_get("/api/config", api_get_config)
     app.router.add_post("/api/config", api_save_config)
