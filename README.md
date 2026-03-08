@@ -139,4 +139,33 @@ See `prompts/biblical_translator.txt` to customize.
 
 ## Architecture
 
-See [PLAN.md](PLAN.md) for the full technical plan, cost estimates, and roadmap.
+```
+┌──────────────┐     ┌──────────────┐     ┌──────────────┐     ┌──────────────┐     ┌──────────────┐
+│  Microphone  │────▶│  Whisper STT │────▶│  GPT-4o      │────▶│  ElevenLabs  │────▶│  Speakers /  │
+│  (Ukrainian) │     │  Transcribe  │     │  Translation  │     │  TTS         │     │  Dante Out   │
+└──────────────┘     └──────────────┘     └──────────────┘     └──────────────┘     └──────────────┘
+```
+
+- **VAD smart chunking** — Detects sentence boundaries for natural translation flow
+- **Streaming pipeline** — Overlapped processing for ~2s per-chunk latency
+- **AES67 multicast** — Native network audio output, no Dante Via required
+- **Web dashboard** — Real-time transcript, health checks, device/language selection
+
+## Testing
+
+```bash
+source venv/bin/activate
+python -m pytest tests/ -v
+```
+
+33 tests covering imports, config, dashboard API, pipeline, launcher, AES67, and OS scripts.
+
+---
+
+## License
+
+MIT
+
+---
+
+**Developed by [Virtus Cybersecurity](https://virtuscyber.com) — Bogdan Salamakha**
