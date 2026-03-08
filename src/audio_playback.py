@@ -7,9 +7,15 @@ import logging
 from typing import Optional
 
 import numpy as np
-import sounddevice as sd
 
 logger = logging.getLogger(__name__)
+
+
+def _load_sounddevice():
+    """Import sounddevice lazily so module import works without PortAudio."""
+    import sounddevice as sd
+
+    return sd
 
 
 class AudioPlayback:
@@ -46,6 +52,7 @@ class AudioPlayback:
 
             # Play synchronously in executor to not block event loop
             loop = asyncio.get_event_loop()
+            sd = _load_sounddevice()
             await loop.run_in_executor(
                 None,
                 lambda: sd.play(audio, samplerate=rate, device=self.device, blocking=True),

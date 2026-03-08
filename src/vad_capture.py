@@ -7,11 +7,17 @@ import logging
 from typing import AsyncIterator, Optional
 
 import numpy as np
-import sounddevice as sd
 
 from .vad_chunker import VADChunker
 
 logger = logging.getLogger(__name__)
+
+
+def _load_sounddevice():
+    """Import sounddevice lazily so module import works without PortAudio."""
+    import sounddevice as sd
+
+    return sd
 
 
 class VADAudioCapture:
@@ -42,8 +48,8 @@ class VADAudioCapture:
             silence_threshold_sec=silence_threshold_sec,
             input_sample_rate=sample_rate,
         )
-        
-        self._stream: Optional[sd.InputStream] = None
+
+        self._stream = None
         self._chunk_queue: asyncio.Queue[bytes] = asyncio.Queue()
         self._running = False
         self._loop: Optional[asyncio.AbstractEventLoop] = None
@@ -70,7 +76,8 @@ class VADAudioCapture:
             "Starting VAD capture: device=%s, rate=%d",
             self.device, self.sample_rate,
         )
-        
+
+        sd = _load_sounddevice()
         self._stream = sd.InputStream(
             device=self.device,
             samplerate=self.sample_rate,
