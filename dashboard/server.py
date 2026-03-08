@@ -257,7 +257,7 @@ async def api_save_config(request):
     """Save device/language config."""
     data = await request.json()
     # Only allow safe keys
-    allowed = {"input_device", "output_device", "source_language", "target_language", "custom_vocabulary", "elevenlabs_voice_id", "stt_model", "translation_model", "tts_model"}
+    allowed = {"input_device", "output_device", "source_language", "target_language", "target_languages", "custom_vocabulary", "elevenlabs_voice_id", "stt_model", "translation_model", "tts_model", "multi_language_mode"}
     filtered = {k: v for k, v in data.items() if k in allowed}
     save_config(filtered)
     return web.json_response({"ok": True})
@@ -584,12 +584,13 @@ async def api_stop_live(request):
             logger.warning("Error stopping capture: %s", e)
         state.live_capture = None
 
-    # Stop AES67 output
+    # Stop AES67 output(s)
     if state.live_aes67:
-        try:
-            state.live_aes67.stop()
-        except Exception as e:
-            logger.warning("Error stopping AES67: %s", e)
+        for a67 in (state.live_aes67 if isinstance(state.live_aes67, list) else [state.live_aes67]):
+            try:
+                a67.stop()
+            except Exception as e:
+                logger.warning("Error stopping AES67: %s", e)
         state.live_aes67 = None
 
     # Stop the pipeline (if set)
@@ -643,6 +644,10 @@ async def _run_live_pipeline():
         src_lang = saved.get("source_language", config.transcription.language)
         tgt_lang = saved.get("target_language", "en")
         custom_vocab = saved.get("custom_vocabulary", "")
+        multi_mode = saved.get("multi_language_mode", False)
+        target_langs = saved.get("target_languages", [tgt_lang])
+        if not multi_mode:
+            target_langs = [tgt_lang]
 
         # Override audio devices from saved config
         input_dev = saved.get("input_device")
@@ -689,86 +694,125 @@ async def _run_live_pipeline():
         if custom_vocab:
             system_prompt += f"\n\nCustom vocabulary and terms to use:\n{custom_vocab}"
 
-        translator = Translator(
-            api_key=config.openai_api_key,
-            system_prompt=system_prompt,
-            model=config.translation.model,
-            temperature=config.translation.temperature,
-            context_sentences=config.pipeline.context_sentences,
-        )
+        # Build per-language output channels
+        # Each target language gets its own translator, synthesizer, playback queue, and optional AES67 stream
+        lang_names = {l["code"]: l["name"] for l in SUPPORTED_LANGUAGES}
+        lang_channels = {}  # {lang_code: {translator, synthesizer, playback_queue, aes67, playback_task}}
 
-        synthesizer = Synthesizer(
-            provider=config.synthesis.provider,
-            openai_api_key=config.openai_api_key,
-            elevenlabs_api_key=config.elevenlabs_api_key,
-            elevenlabs_voice_id=config.synthesis.elevenlabs.voice_id,
-            elevenlabs_model=config.synthesis.elevenlabs.model,
-            elevenlabs_stability=config.synthesis.elevenlabs.stability,
-            elevenlabs_similarity=config.synthesis.elevenlabs.similarity_boost,
-            openai_model=config.synthesis.openai.model,
-            openai_voice=config.synthesis.openai.voice,
-        )
+        # Base AES67 multicast: 239.69.0.1 for first lang, .2 for second, etc.
+        base_multicast = config.output.multicast_address.rsplit(".", 1)
+        base_multicast_prefix = base_multicast[0] + "."
+        base_multicast_last = int(base_multicast[1])
+        base_port = config.output.port
 
+        for i, lang_code in enumerate(target_langs):
+            lang_name = lang_names.get(lang_code, lang_code)
+
+            # Each language gets its own translator with language-specific prompt
+            lang_system_prompt = system_prompt.replace(
+                "English", lang_name
+            ) if "English" in system_prompt else system_prompt + f"\n\nTranslate to {lang_name}."
+
+            lang_translator = Translator(
+                api_key=config.openai_api_key,
+                system_prompt=lang_system_prompt,
+                model=config.translation.model,
+                temperature=config.translation.temperature,
+                context_sentences=config.pipeline.context_sentences,
+            )
+
+            lang_synthesizer = Synthesizer(
+                provider=config.synthesis.provider,
+                openai_api_key=config.openai_api_key,
+                elevenlabs_api_key=config.elevenlabs_api_key,
+                elevenlabs_voice_id=config.synthesis.elevenlabs.voice_id,
+                elevenlabs_model=config.synthesis.elevenlabs.model,
+                elevenlabs_stability=config.synthesis.elevenlabs.stability,
+                elevenlabs_similarity=config.synthesis.elevenlabs.similarity_boost,
+                openai_model=config.synthesis.openai.model,
+                openai_voice=config.synthesis.openai.voice,
+            )
+
+            # AES67: each language gets its own multicast stream
+            lang_aes67 = None
+            if config.output.mode in ("dante", "both"):
+                from src.aes67_output import AES67Sender
+                lang_aes67 = AES67Sender(
+                    stream_name=f"Church Translation {lang_code.upper()}",
+                    multicast_addr=f"{base_multicast_prefix}{base_multicast_last + i}",
+                    port=base_port + (i * 2),
+                    ttl=config.output.ttl,
+                )
+                lang_aes67.start()
+
+            lang_channels[lang_code] = {
+                "name": lang_name,
+                "translator": lang_translator,
+                "synthesizer": lang_synthesizer,
+                "aes67": lang_aes67,
+                "playback_queue": asyncio.Queue(),
+            }
+
+        # Primary playback (first language goes to local speakers)
         playback = AudioPlayback(
             device=config.audio.output_device,
             sample_rate=24000,
             channels=1,
         )
-
-        # Optional AES67
-        aes67 = None
-        if config.output.mode in ("dante", "both"):
-            from src.aes67_output import AES67Sender
-            aes67 = AES67Sender(
-                stream_name=config.output.stream_name,
-                multicast_addr=config.output.multicast_address,
-                port=config.output.port,
-                ttl=config.output.ttl,
-            )
-            aes67.start()
+        primary_lang = target_langs[0] if target_langs else tgt_lang
 
         # Store references so api_stop_live can stop them
         state.live_capture = capture
         state.live_playback = playback
-        state.live_aes67 = aes67
+        state.live_aes67 = [ch["aes67"] for ch in lang_channels.values() if ch["aes67"]]
 
         await capture.start()
-        await broadcast({"type": "info", "message": "Microphone active — listening for speech..."})
 
-        lang_names = {l["code"]: l["name"] for l in SUPPORTED_LANGUAGES}
-        src_name = lang_names.get(src_lang, src_lang)
-        tgt_name = lang_names.get(tgt_lang, tgt_lang)
+        mode_desc = "Multi-language" if multi_mode else "Single-language"
+        lang_list = ", ".join(lang_names.get(l, l) for l in target_langs)
+        await broadcast({"type": "info", "message": f"🎙️ {mode_desc} mode — listening ({lang_list})..."})
+
         total_latency = 0.0
         chunk_count = 0
 
-        # Playback queue — TTS audio is played in order but doesn't block the pipeline
-        playback_queue = asyncio.Queue()
+        # Playback workers — one per language
+        playback_workers = []
         playback_active = True
 
-        async def _playback_worker():
-            """Plays TTS audio in order without blocking the main processing loop."""
-            while playback_active or not playback_queue.empty():
+        async def _playback_worker(lang_code):
+            """Plays TTS audio for a specific language channel."""
+            ch = lang_channels[lang_code]
+            q = ch["playback_queue"]
+            is_primary = (lang_code == primary_lang)
+            while playback_active or not q.empty():
                 try:
-                    audio_bytes = await asyncio.wait_for(playback_queue.get(), timeout=0.5)
+                    audio_bytes = await asyncio.wait_for(q.get(), timeout=0.5)
                     if audio_bytes is None:
                         break
-                    play_tasks = [playback.play(audio_bytes)]
-                    if aes67:
-                        play_tasks.append(aes67.play(audio_bytes))
-                    await asyncio.gather(*play_tasks)
+                    play_tasks = []
+                    # Primary language plays through local speakers
+                    if is_primary:
+                        play_tasks.append(playback.play(audio_bytes))
+                    # AES67 output for this language's stream
+                    if ch["aes67"]:
+                        play_tasks.append(ch["aes67"].play(audio_bytes))
+                    if play_tasks:
+                        await asyncio.gather(*play_tasks)
                 except asyncio.TimeoutError:
                     continue
                 except Exception as e:
-                    logger.warning("Playback error: %s", e)
+                    logger.warning("Playback error (%s): %s", lang_code, e)
 
-        playback_task = asyncio.create_task(_playback_worker())
+        for lang_code in target_langs:
+            task = asyncio.create_task(_playback_worker(lang_code))
+            playback_workers.append(task)
 
         async def _process_chunk(wav_bytes, seq):
-            """Process a single chunk: STT → Translate → TTS (queued)."""
+            """Process a single chunk: STT → fan-out to all languages → TTS (queued)."""
             nonlocal total_latency
             t0 = time.time()
 
-            # STT
+            # STT (shared — one transcription for all languages)
             src_text = await transcriber.transcribe(wav_bytes)
             if not src_text:
                 return
@@ -780,44 +824,48 @@ async def _run_live_pipeline():
                 "text": src_text,
             })
 
-            # Translate
-            tgt_text = await translator.translate(src_text)
-            if not tgt_text:
-                return
+            # Fan-out: translate + TTS for each target language in parallel
+            async def _translate_lang(lang_code):
+                ch = lang_channels[lang_code]
+                tgt_text = await ch["translator"].translate(src_text)
+                if not tgt_text:
+                    return None
+                # TTS and queue for playback
+                audio_bytes = await ch["synthesizer"].synthesize(tgt_text)
+                if audio_bytes:
+                    await ch["playback_queue"].put(audio_bytes)
+                return {"lang": lang_code, "text": tgt_text}
+
+            results = await asyncio.gather(*[_translate_lang(lc) for lc in target_langs], return_exceptions=True)
 
             latency = time.time() - t0
             total_latency += latency
             state.stats["chunks_processed"] = seq
             state.stats["avg_latency"] = total_latency / seq
 
-            entry = {
-                "seq": seq,
-                "source": src_text,
-                "translated": tgt_text,
-                "source_lang": src_lang,
-                "target_lang": tgt_lang,
-                "latency": round(latency, 1),
-                "timestamp": time.time(),
-                "ukrainian": src_text,
-                "english": tgt_text,
-            }
-            state.transcript.append(entry)
-
-            await broadcast({
-                "type": "translation",
-                "entry": entry,
-                "progress": 0,
-                "stats": {
-                    "chunks_processed": seq,
-                    "total_chunks": 0,
-                    "avg_latency": round(state.stats["avg_latency"], 1),
-                },
-            })
-
-            # TTS — synthesize and queue for playback (non-blocking)
-            audio_bytes = await synthesizer.synthesize(tgt_text)
-            if audio_bytes:
-                await playback_queue.put(audio_bytes)
+            # Broadcast translations for all languages
+            for r in results:
+                if isinstance(r, dict):
+                    entry = {
+                        "seq": seq,
+                        "source": src_text,
+                        "translated": r["text"],
+                        "source_lang": src_lang,
+                        "target_lang": r["lang"],
+                        "latency": round(latency, 1),
+                        "timestamp": time.time(),
+                    }
+                    state.transcript.append(entry)
+                    await broadcast({
+                        "type": "translation",
+                        "entry": entry,
+                        "progress": 0,
+                        "stats": {
+                            "chunks_processed": seq,
+                            "total_chunks": 0,
+                            "avg_latency": round(state.stats["avg_latency"], 1),
+                        },
+                    })
 
         # Main loop: capture overlaps with processing
         # We process chunks concurrently (up to 2 at a time) so capture never stalls
@@ -848,15 +896,17 @@ async def _run_live_pipeline():
         if processing_tasks:
             await asyncio.gather(*processing_tasks, return_exceptions=True)
 
-        # Signal playback worker to stop after draining queue
+        # Signal all playback workers to stop after draining queues
         playback_active = False
-        await playback_queue.put(None)
-        await playback_task
+        for lang_code in target_langs:
+            await lang_channels[lang_code]["playback_queue"].put(None)
+        await asyncio.gather(*playback_workers, return_exceptions=True)
 
         # Cleanup
         await capture.stop()
-        if aes67:
-            aes67.stop()
+        for ch in lang_channels.values():
+            if ch["aes67"]:
+                ch["aes67"].stop()
 
     except asyncio.CancelledError:
         logger.info("Live pipeline cancelled")
@@ -872,10 +922,12 @@ async def _run_live_pipeline():
                 pass
             state.live_capture = None
         if state.live_aes67:
-            try:
-                state.live_aes67.stop()
-            except Exception:
-                pass
+            aes67_list = state.live_aes67 if isinstance(state.live_aes67, list) else [state.live_aes67]
+            for a67 in aes67_list:
+                try:
+                    a67.stop()
+                except Exception:
+                    pass
             state.live_aes67 = None
         state.live_playback = None
         state.live_running = False
