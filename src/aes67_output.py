@@ -53,7 +53,7 @@ def _build_sdp(
         f"a=rtpmap:{_RTP_PAYLOAD_TYPE} L24/{_AES67_SAMPLE_RATE}/{_AES67_CHANNELS}\r\n"
         f"a=ptime:{_AES67_PACKET_TIME_MS}\r\n"
         "a=sendonly\r\n"
-        f"a=clock-domain:PTPv2 0\r\n"
+        "a=ts-refclk:localmac\r\n"
     )
 
 
@@ -160,7 +160,9 @@ class AES67Sender:
         self.ttl = ttl
 
         self._rtp_seq = 0
-        self._rtp_ts = 0
+        # Initialize RTP timestamp from wall clock so Dante sees correct latency.
+        # AES67 timestamps run at 48kHz. We use (time * 48000) mod 2^32.
+        self._rtp_ts = int(time.time() * _AES67_SAMPLE_RATE) & 0xFFFFFFFF
         self._rtp_ssrc = struct.unpack("!I", struct.pack("!I", hash(stream_name) & 0xFFFFFFFF))[0]
         self._session_id = int(time.time())
 
@@ -184,6 +186,9 @@ class AES67Sender:
 
         # Detect local IP for SAP origin
         self._origin_addr = self._get_local_ip()
+
+        # Re-sync RTP timestamp to wall clock at stream start
+        self._rtp_ts = int(time.time() * _AES67_SAMPLE_RATE) & 0xFFFFFFFF
 
         # RTP multicast socket
         self._rtp_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
