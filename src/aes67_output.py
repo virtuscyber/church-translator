@@ -141,6 +141,10 @@ class AES67Sender:
     Provides the same async ``play(pcm_bytes, sample_rate)`` interface as
     :class:`AudioPlayback` so it can be used as a drop-in replacement
     in the translation pipeline.
+
+    AES67 requires a **continuous** packet stream — even during silence.
+    A background thread sends silence at 1ms intervals, and ``play()``
+    injects real audio into the stream buffer.
     """
 
     def __init__(
@@ -163,8 +167,15 @@ class AES67Sender:
         self._rtp_sock: Optional[socket.socket] = None
         self._sap_sock: Optional[socket.socket] = None
         self._sap_thread: Optional[threading.Thread] = None
+        self._stream_thread: Optional[threading.Thread] = None
         self._running = False
         self._origin_addr = "0.0.0.0"
+
+        # Audio buffer for continuous streaming — lock-protected ring buffer
+        self._audio_lock = threading.Lock()
+        self._audio_buffer = bytearray()  # L24 bytes ready to send
+        # Pre-compute one packet of silence (48 samples × 3 bytes = 144 bytes of zeros)
+        self._silence_packet = b'\x00' * (_SAMPLES_PER_PACKET * 3)
 
     def start(self):
         """Open sockets and begin SAP announcements."""
@@ -193,12 +204,16 @@ class AES67Sender:
 
         self._running = True
 
+        # Start continuous RTP stream thread (sends silence when no audio)
+        self._stream_thread = threading.Thread(target=self._continuous_stream_loop, daemon=True)
+        self._stream_thread.start()
+
         # Start SAP announcement thread
         self._sap_thread = threading.Thread(target=self._sap_loop, daemon=True)
         self._sap_thread.start()
 
         logger.info(
-            "AES67 sender started: %s @ %s:%d (SSRC=%08X)",
+            "AES67 sender started: %s @ %s:%d (SSRC=%08X) [continuous stream]",
             self.stream_name, self.multicast_addr, self.port, self._rtp_ssrc,
         )
 
@@ -229,6 +244,10 @@ class AES67Sender:
             self._rtp_sock.close()
             self._rtp_sock = None
 
+        if self._stream_thread:
+            self._stream_thread.join(timeout=2.0)
+            self._stream_thread = None
+
         if self._sap_thread:
             self._sap_thread.join(timeout=2.0)
             self._sap_thread = None
@@ -236,11 +255,12 @@ class AES67Sender:
         logger.info("AES67 sender stopped.")
 
     async def play(self, pcm_bytes: bytes, sample_rate: Optional[int] = None):
-        """Stream PCM int16 audio as AES67 RTP packets.
+        """Queue PCM int16 audio into the continuous AES67 stream.
 
         Matches the :class:`AudioPlayback` interface. Accepts raw PCM int16 bytes
         (from ElevenLabs/OpenAI TTS), resamples to 48kHz, converts to L24,
-        and sends as RTP multicast packets at real-time pace.
+        and appends to the stream buffer. The background thread handles
+        real-time pacing — this method returns immediately.
 
         Args:
             pcm_bytes: Raw PCM audio (int16, mono).
@@ -272,56 +292,68 @@ class AES67Sender:
             src = audio_int16.astype(np.float64)
             audio_48k = src[idx_floor] * (1 - frac) + src[idx_ceil] * frac
 
-        # Convert to L24 bytes
+        # Convert to L24 bytes and append to buffer
         l24_bytes = _float_to_l24_fast(audio_48k)
 
-        bytes_per_sample = 3  # L24
-        bytes_per_packet = _SAMPLES_PER_PACKET * bytes_per_sample
-        total_packets = len(l24_bytes) // bytes_per_packet
-
         logger.info(
-            "AES67: streaming %d samples (%.1fs) as %d RTP packets",
+            "AES67: queued %d samples (%.1fs) into stream buffer",
             len(audio_48k),
             len(audio_48k) / _AES67_SAMPLE_RATE,
-            total_packets,
         )
 
-        # Send packets at real-time pace
-        loop = asyncio.get_event_loop()
-        await loop.run_in_executor(None, self._send_rtp_stream, l24_bytes, total_packets)
+        with self._audio_lock:
+            self._audio_buffer.extend(l24_bytes)
 
-    def _send_rtp_stream(self, l24_bytes: bytes, total_packets: int):
-        """Send RTP packets at real-time pace (blocking, runs in executor)."""
-        bytes_per_packet = _SAMPLES_PER_PACKET * 3
+    def _continuous_stream_loop(self):
+        """Send RTP packets continuously at 1ms intervals (runs in daemon thread).
+
+        When audio is in the buffer, sends real audio. Otherwise sends silence.
+        This keeps the AES67 stream alive so Dante Controller never drops it.
+        """
+        bytes_per_packet = _SAMPLES_PER_PACKET * 3  # 48 samples × 3 bytes = 144
         packet_interval = _AES67_PACKET_TIME_MS / 1000.0  # 1ms
 
         t_start = time.monotonic()
+        packet_count = 0
 
-        for i in range(total_packets):
-            if not self._running:
-                break
+        logger.info("AES67 continuous stream started (1ms packet cadence)")
 
-            offset = i * bytes_per_packet
-            payload = l24_bytes[offset:offset + bytes_per_packet]
+        while self._running:
+            # Get audio from buffer, or use silence
+            with self._audio_lock:
+                if len(self._audio_buffer) >= bytes_per_packet:
+                    payload = bytes(self._audio_buffer[:bytes_per_packet])
+                    del self._audio_buffer[:bytes_per_packet]
+                else:
+                    payload = self._silence_packet
 
-            # Build RTP header
-            header = self._build_rtp_header(marker=(i == 0))
+            # Build and send RTP packet
+            # Set marker bit on first packet and after silence→audio transitions
+            header = self._build_rtp_header(marker=(packet_count == 0))
             packet = header + payload
 
             try:
                 self._rtp_sock.sendto(packet, (self.multicast_addr, self.port))
             except OSError as e:
-                logger.error("RTP send failed: %s", e)
+                if self._running:
+                    logger.error("RTP send failed: %s", e)
                 break
 
             self._rtp_seq = (self._rtp_seq + 1) & 0xFFFF
             self._rtp_ts = (self._rtp_ts + _SAMPLES_PER_PACKET) & 0xFFFFFFFF
+            packet_count += 1
 
-            # Pace to real-time: sleep until the next packet is due
-            expected_time = t_start + (i + 1) * packet_interval
+            # Pace to real-time
+            expected_time = t_start + packet_count * packet_interval
             now = time.monotonic()
             if expected_time > now:
                 time.sleep(expected_time - now)
+            elif now - expected_time > 0.01:
+                # We've fallen behind by >10ms — reset timing to avoid burst
+                t_start = now
+                packet_count = 0
+
+        logger.info("AES67 continuous stream stopped (sent %d packets)", packet_count)
 
     def _build_rtp_header(self, marker: bool = False) -> bytes:
         """Build a 12-byte RTP header (RFC 3550)."""
