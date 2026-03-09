@@ -6,6 +6,7 @@ import asyncio
 import io
 import logging
 import struct
+import threading
 from typing import Optional
 
 import numpy as np
@@ -36,7 +37,7 @@ class AudioCapture:
         self.chunk_duration_sec = chunk_duration_sec
         self._stream = None
         self._buffer: list[np.ndarray] = []
-        self._lock = asyncio.Lock()
+        self._buffer_lock = threading.Lock()
         self._running = False
 
     @property
@@ -46,7 +47,8 @@ class AudioCapture:
     def _audio_callback(self, indata: np.ndarray, frames: int, time_info, status):
         if status:
             logger.warning("Audio capture status: %s", status)
-        self._buffer.append(indata.copy())
+        with self._buffer_lock:
+            self._buffer.append(indata.copy())
 
     async def start(self):
         """Start capturing audio."""
@@ -58,7 +60,8 @@ class AudioCapture:
         )
         sd = _load_sounddevice()
         self._running = True
-        self._buffer = []
+        with self._buffer_lock:
+            self._buffer = []
         self._stream = sd.InputStream(
             device=self.device,
             samplerate=self.sample_rate,
@@ -73,22 +76,24 @@ class AudioCapture:
         """Stop capturing audio."""
         self._running = False
         if self._stream:
-            self._stream.stop()
-            self._stream.close()
+            try:
+                self._stream.stop()
+            finally:
+                self._stream.close()
             self._stream = None
         logger.info("Audio capture stopped.")
 
     async def get_chunk(self) -> Optional[bytes]:
         """Wait for a full chunk of audio and return as WAV bytes."""
         while self._running:
-            total_samples = sum(b.shape[0] for b in self._buffer)
-            if total_samples >= self.chunk_samples:
-                # Concatenate and split
-                all_audio = np.concatenate(self._buffer, axis=0)
-                chunk = all_audio[: self.chunk_samples]
-                remainder = all_audio[self.chunk_samples :]
-                self._buffer = [remainder] if len(remainder) > 0 else []
-                return self._pcm_to_wav(chunk)
+            with self._buffer_lock:
+                total_samples = sum(b.shape[0] for b in self._buffer)
+                if total_samples >= self.chunk_samples:
+                    all_audio = np.concatenate(self._buffer, axis=0)
+                    chunk = all_audio[: self.chunk_samples]
+                    remainder = all_audio[self.chunk_samples :]
+                    self._buffer = [remainder] if len(remainder) > 0 else []
+                    return self._pcm_to_wav(chunk)
             await asyncio.sleep(0.1)
         return None
 
@@ -120,7 +125,8 @@ class AudioCapture:
 
     def get_rms(self) -> float:
         """Get current RMS level of buffer (for monitoring)."""
-        if not self._buffer:
-            return 0.0
-        recent = self._buffer[-1] if self._buffer else np.zeros(1)
+        with self._buffer_lock:
+            if not self._buffer:
+                return 0.0
+            recent = self._buffer[-1] if self._buffer else np.zeros(1)
         return float(np.sqrt(np.mean(recent ** 2)))

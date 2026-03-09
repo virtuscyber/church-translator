@@ -916,6 +916,7 @@
     let reconnectTimer = null;
     let wizardStep = 1;
     let languages = [];
+    let pageUnloading = false;
 
     const LANG_LIST = [
         {code:"uk",name:"Ukrainian"},{code:"ru",name:"Russian"},{code:"es",name:"Spanish"},
@@ -984,29 +985,47 @@
     }
 
     // ── Audio Level Monitor ─────────────────────────
-    let audioScanInterval = null;
-    let selectedLevelInterval = null;
+    let audioScanTimer = null;
+    let audioScanActive = false;
+    let audioScanInFlight = false;
+    let selectedLevelTimer = null;
+    let selectedMonitorToken = 0;
 
     async function toggleAudioScan() {
         const btn = document.getElementById('scanBtn');
         const bars = document.getElementById('audioLevelBars');
-        if (audioScanInterval) {
-            clearInterval(audioScanInterval);
-            audioScanInterval = null;
+        if (audioScanActive) {
+            audioScanActive = false;
+            if (audioScanTimer) clearTimeout(audioScanTimer);
+            audioScanTimer = null;
             btn.textContent = '🔍 Scan All Inputs';
             bars.style.display = 'none';
             return;
         }
+        audioScanActive = true;
         btn.textContent = '⏹️ Stop Scan';
         bars.style.display = 'block';
         bars.innerHTML = '<div style="color:var(--text-dim);font-size:0.8em;">Scanning all input devices...</div>';
-        await scanAudioLevels();
-        audioScanInterval = setInterval(scanAudioLevels, 1500);
+        await runAudioScanLoop();
+    }
+
+    async function runAudioScanLoop() {
+        if (!audioScanActive || audioScanInFlight) return;
+        audioScanInFlight = true;
+        try {
+            await scanAudioLevels();
+        } finally {
+            audioScanInFlight = false;
+            if (audioScanActive) {
+                audioScanTimer = setTimeout(runAudioScanLoop, 1500);
+            }
+        }
     }
 
     async function scanAudioLevels() {
         try {
             const res = await fetch('/api/audio-levels');
+            if (!res.ok) throw new Error('Audio scan request failed');
             const data = await res.json();
             const bars = document.getElementById('audioLevelBars');
             if (!data.devices || data.devices.length === 0) {
@@ -1022,9 +1041,10 @@
                     ? '<span class="level-badge active">LIVE</span>'
                     : '<span class="level-badge silent">silent</span>';
                 const dbText = d.error ? 'err' : d.level_db !== null ? `${d.level_db} dB` : '—';
-                const escapedName = d.name.replace(/'/g, "\\'");
-                return `<div class="level-row ${hasAudio ? 'has-audio' : ''}" onclick="selectInputDevice(${d.index}, '${escapedName}')">
-                    <div class="level-name" title="${d.name}">${d.name}</div>
+                const safeName = escapeHtml(d.name);
+                const jsName = JSON.stringify(d.name);
+                return `<div class="level-row ${hasAudio ? 'has-audio' : ''}" onclick='selectInputDevice(${d.index}, ${jsName})'>
+                    <div class="level-name" title="${safeName}">${safeName}</div>
                     <div class="level-bar-bg"><div class="level-bar-fill ${fillClass}" style="width:${pct}%"></div></div>
                     <div class="level-db">${dbText}</div>
                     ${badge}
@@ -1032,6 +1052,7 @@
             }).join('');
         } catch (e) {
             console.error('Audio scan failed:', e);
+            document.getElementById('audioLevelBars').innerHTML = '<div style="color:var(--red);font-size:0.8em;">Audio scan failed.</div>';
         }
     }
 
@@ -1045,24 +1066,34 @@
         const panel = document.getElementById('selectedDeviceLevel');
         panel.style.display = 'block';
         document.getElementById('selectedDeviceName').textContent = name.substring(0, 20);
-        if (selectedLevelInterval) clearInterval(selectedLevelInterval);
+        if (selectedLevelTimer) clearTimeout(selectedLevelTimer);
+        const token = ++selectedMonitorToken;
         async function poll() {
+            if (token !== selectedMonitorToken) return;
             try {
                 const res = await fetch('/api/audio-level', {
                     method: 'POST',
                     headers: {'Content-Type': 'application/json'},
                     body: JSON.stringify({device_index: index}),
                 });
+                if (!res.ok) throw new Error('Selected device polling failed');
                 const d = await res.json();
                 const bar = document.getElementById('selectedLevelBar');
                 const db = document.getElementById('selectedLevelDb');
                 const pct = d.level_pct || 0;
                 bar.style.width = pct + '%';
                 db.textContent = d.peak_db !== undefined ? d.peak_db + ' dB' : '\u2014';
-            } catch (e) {}
+            } catch (e) {
+                if (token !== selectedMonitorToken) return;
+                document.getElementById('selectedLevelBar').style.width = '0%';
+                document.getElementById('selectedLevelDb').textContent = 'err';
+            } finally {
+                if (token === selectedMonitorToken) {
+                    selectedLevelTimer = setTimeout(poll, 300);
+                }
+            }
         }
         poll();
-        selectedLevelInterval = setInterval(poll, 300);
     }
 
     document.getElementById('inputDevice').addEventListener('change', function() {
@@ -1070,6 +1101,11 @@
         if (idx !== '') {
             const name = this.options[this.selectedIndex]?.text || '';
             startSelectedDeviceMonitor(parseInt(idx), name);
+        } else {
+            selectedMonitorToken += 1;
+            if (selectedLevelTimer) clearTimeout(selectedLevelTimer);
+            selectedLevelTimer = null;
+            document.getElementById('selectedDeviceLevel').style.display = 'none';
         }
     });
 
@@ -1416,7 +1452,10 @@
 
         ws.onclose = () => {
             document.getElementById('connectionDot').classList.remove('connected');
-            reconnectTimer = setTimeout(connectWS, 2000);
+            if (!pageUnloading) {
+                if (reconnectTimer) clearTimeout(reconnectTimer);
+                reconnectTimer = setTimeout(connectWS, 2000);
+            }
         };
 
         ws.onmessage = (event) => handleMessage(JSON.parse(event.data));
@@ -1560,6 +1599,16 @@
         toast.classList.add('show');
         setTimeout(() => toast.classList.remove('show'), 4000);
     }
+
+    window.addEventListener('beforeunload', () => {
+        pageUnloading = true;
+        audioScanActive = false;
+        selectedMonitorToken += 1;
+        if (audioScanTimer) clearTimeout(audioScanTimer);
+        if (selectedLevelTimer) clearTimeout(selectedLevelTimer);
+        if (reconnectTimer) clearTimeout(reconnectTimer);
+        if (ws) ws.close();
+    });
 
     // ── Actions ───────────────────────────────────
     async function startTest() {

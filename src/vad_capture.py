@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import threading
 from typing import AsyncIterator, Optional
 
 import numpy as np
@@ -53,6 +54,7 @@ class VADAudioCapture:
         self._chunk_queue: asyncio.Queue[bytes] = asyncio.Queue()
         self._running = False
         self._loop: Optional[asyncio.AbstractEventLoop] = None
+        self._chunker_lock = threading.Lock()
 
     def _audio_callback(self, indata: np.ndarray, frames: int, time_info, status):
         """Called from audio thread — feed to VAD chunker."""
@@ -61,11 +63,15 @@ class VADAudioCapture:
         
         # VAD chunker expects mono float32
         audio = indata[:, 0] if indata.ndim > 1 else indata.flatten()
-        
-        chunks = self._chunker.feed(audio)
+
+        with self._chunker_lock:
+            chunks = self._chunker.feed(audio)
         for chunk in chunks:
             if self._loop:
-                self._loop.call_soon_threadsafe(self._chunk_queue.put_nowait, chunk)
+                try:
+                    self._loop.call_soon_threadsafe(self._chunk_queue.put_nowait, chunk)
+                except RuntimeError:
+                    logger.debug("Event loop closed before queued VAD chunk could be delivered")
 
     async def start(self):
         """Start VAD-aware audio capture."""
@@ -92,12 +98,15 @@ class VADAudioCapture:
         """Stop capture and flush remaining audio."""
         self._running = False
         if self._stream:
-            self._stream.stop()
-            self._stream.close()
+            try:
+                self._stream.stop()
+            finally:
+                self._stream.close()
             self._stream = None
-        
+
         # Flush remaining audio
-        final = self._chunker.flush()
+        with self._chunker_lock:
+            final = self._chunker.flush()
         if final:
             self._chunk_queue.put_nowait(final)
         

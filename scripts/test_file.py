@@ -128,12 +128,14 @@ async def run_test_streaming(input_file: str, output_file: str, use_vad: bool = 
         )
         with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
             tmp_path = tmp.name
-        subprocess.run(
-            ["ffmpeg", "-i", input_file, "-ar", "16000", "-ac", "1", "-sample_fmt", "s16", "-y", tmp_path],
-            capture_output=True, check=True,
-        )
-        chunks = vad_chunker.chunk_file(tmp_path)
-        Path(tmp_path).unlink(missing_ok=True)
+        try:
+            subprocess.run(
+                ["ffmpeg", "-i", input_file, "-ar", "16000", "-ac", "1", "-sample_fmt", "s16", "-y", tmp_path],
+                capture_output=True, check=True,
+            )
+            chunks = vad_chunker.chunk_file(tmp_path)
+        finally:
+            Path(tmp_path).unlink(missing_ok=True)
     else:
         chunks = chunk_audio_file(input_file)
 
@@ -219,12 +221,14 @@ async def run_test(input_file: str, output_file: str, chunk_sec: float, use_vad:
         import subprocess, tempfile
         with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
             tmp_path = tmp.name
-        subprocess.run(
-            ["ffmpeg", "-i", input_file, "-ar", "16000", "-ac", "1", "-sample_fmt", "s16", "-y", tmp_path],
-            capture_output=True, check=True,
-        )
-        chunks = vad_chunker.chunk_file(tmp_path)
-        Path(tmp_path).unlink(missing_ok=True)
+        try:
+            subprocess.run(
+                ["ffmpeg", "-i", input_file, "-ar", "16000", "-ac", "1", "-sample_fmt", "s16", "-y", tmp_path],
+                capture_output=True, check=True,
+            )
+            chunks = vad_chunker.chunk_file(tmp_path)
+        finally:
+            Path(tmp_path).unlink(missing_ok=True)
     else:
         logger.info("📏 Using fixed-duration chunking (%.1fs)", chunk_sec)
         chunks = chunk_audio_file(input_file, chunk_sec)
@@ -326,7 +330,7 @@ def main():
     Path(args.output).parent.mkdir(parents=True, exist_ok=True)
 
     if args.streaming:
-        asyncio.run(run_test_streaming(args.input, args.output, use_vad=args.vad or True))
+        asyncio.run(run_test_streaming(args.input, args.output, use_vad=args.vad))
     else:
         asyncio.run(run_test(args.input, args.output, args.chunk_sec, use_vad=args.vad))
 
