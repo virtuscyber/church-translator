@@ -150,20 +150,22 @@ class StreamingPipeline:
 
         self._running = True
         self._pipeline_start_time = time.monotonic()
-        if self.aes67:
-            self.aes67.start()
-        await self.capture.start()
-
-        # Launch all workers concurrently
-        workers = [
-            asyncio.create_task(self._capture_worker(), name="capture"),
-            asyncio.create_task(self._stt_worker(), name="stt"),
-            asyncio.create_task(self._translate_worker(), name="translate"),
-            asyncio.create_task(self._tts_worker(), name="tts"),
-            asyncio.create_task(self._playback_worker(), name="playback"),
-        ]
+        workers = []
 
         try:
+            if self.aes67:
+                self.aes67.start()
+            await self.capture.start()
+
+            # Launch all workers concurrently
+            workers = [
+                asyncio.create_task(self._capture_worker(), name="capture"),
+                asyncio.create_task(self._stt_worker(), name="stt"),
+                asyncio.create_task(self._translate_worker(), name="translate"),
+                asyncio.create_task(self._tts_worker(), name="tts"),
+                asyncio.create_task(self._playback_worker(), name="playback"),
+            ]
+
             # Wait for any worker to finish (usually due to stop/error)
             done, pending = await asyncio.wait(
                 workers, return_when=asyncio.FIRST_EXCEPTION

@@ -5,6 +5,7 @@ import json
 import sys
 from types import SimpleNamespace
 
+import numpy as np
 import pytest
 
 
@@ -20,6 +21,64 @@ class DummyRequest:
 
 def decode_json_response(response):
     return json.loads(response.text)
+
+
+def make_fake_monitor_sounddevice():
+    devices = [
+        {
+            "name": "Hot Mic",
+            "default_samplerate": 48000,
+            "max_input_channels": 1,
+            "max_output_channels": 0,
+        },
+        {
+            "name": "Main Speakers",
+            "default_samplerate": 48000,
+            "max_input_channels": 0,
+            "max_output_channels": 2,
+        },
+        {
+            "name": "Broken Mic",
+            "default_samplerate": 48000,
+            "max_input_channels": 1,
+            "max_output_channels": 0,
+        },
+    ]
+
+    class FakeInputStream:
+        def __init__(self, *, device, samplerate, channels, dtype, blocksize):
+            self.device = device
+            self.blocksize = blocksize
+
+        def __enter__(self):
+            if self.device == 2:
+                raise RuntimeError("device busy")
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def read(self, frames):
+            if self.device == 0:
+                audio = np.full((frames, 1), 0.5, dtype=np.float32)
+            else:
+                audio = np.zeros((frames, 1), dtype=np.float32)
+            return audio, False
+
+    def query_devices(index=None):
+        if index is None:
+            return devices
+        return devices[index]
+
+    def check_input_settings(*, device, **kwargs):
+        if device == 1:
+            raise RuntimeError("not an input")
+
+    return SimpleNamespace(
+        query_devices=query_devices,
+        check_input_settings=check_input_settings,
+        InputStream=FakeInputStream,
+    )
 
 
 @pytest.mark.asyncio
@@ -61,6 +120,54 @@ async def test_devices_endpoint_lists_audio_devices(monkeypatch, fake_sounddevic
     payload = decode_json_response(response)
     assert payload["input"] == [{"index": 0, "name": "USB Mic", "sample_rate": 48000}]
     assert payload["output"] == [{"index": 1, "name": "Main Speakers", "sample_rate": 48000}]
+
+
+@pytest.mark.asyncio
+async def test_audio_level_single_samples_selected_input(monkeypatch):
+    from dashboard import server
+
+    monkeypatch.setitem(sys.modules, "sounddevice", make_fake_monitor_sounddevice())
+
+    response = await server.api_audio_level_single(
+        DummyRequest("/api/audio-level", data={"device_index": 0})
+    )
+
+    assert response.status == 200
+    payload = decode_json_response(response)
+    assert payload["index"] == 0
+    assert payload["has_audio"] is True
+    assert payload["peak_db"] == -6.0
+    assert payload["level_pct"] == 90
+
+
+@pytest.mark.asyncio
+async def test_audio_level_single_rejects_output_only_device(monkeypatch):
+    from dashboard import server
+
+    monkeypatch.setitem(sys.modules, "sounddevice", make_fake_monitor_sounddevice())
+
+    response = await server.api_audio_level_single(
+        DummyRequest("/api/audio-level", data={"device_index": 1})
+    )
+
+    assert response.status == 400
+    assert decode_json_response(response)["error"] == "Selected device is not an input device"
+
+
+@pytest.mark.asyncio
+async def test_audio_levels_marks_failed_devices_without_crashing(monkeypatch):
+    from dashboard import server
+
+    monkeypatch.setitem(sys.modules, "sounddevice", make_fake_monitor_sounddevice())
+
+    response = await server.api_audio_levels(DummyRequest("/api/audio-levels"))
+
+    assert response.status == 200
+    payload = decode_json_response(response)
+    assert payload["devices"][0]["name"] == "Hot Mic"
+    assert payload["devices"][0]["has_audio"] is True
+    assert payload["devices"][1]["name"] == "Broken Mic"
+    assert payload["devices"][1]["error"] is True
 
 
 @pytest.mark.asyncio
@@ -162,4 +269,44 @@ async def test_websocket_connects_and_responds_to_ping(monkeypatch):
     assert response is fake_ws
     assert fake_ws.sent[0]["type"] == "init"
     assert fake_ws.sent[1] == {"type": "pong"}
+    assert server.state.connected_clients == []
+
+
+@pytest.mark.asyncio
+async def test_websocket_rejects_invalid_json_without_crashing(monkeypatch):
+    from dashboard import server
+
+    class FakeMessage:
+        def __init__(self, msg_type, data):
+            self.type = msg_type
+            self.data = data
+
+    class FakeWebSocket:
+        def __init__(self):
+            self.sent = []
+            self._messages = [
+                FakeMessage(server.web.WSMsgType.TEXT, "{not-json"),
+            ]
+
+        async def prepare(self, request):
+            return self
+
+        async def send_json(self, payload):
+            self.sent.append(payload)
+
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            if self._messages:
+                return self._messages.pop(0)
+            raise StopAsyncIteration
+
+    fake_ws = FakeWebSocket()
+    monkeypatch.setattr(server.web, "WebSocketResponse", lambda: fake_ws)
+
+    response = await server.websocket_handler(DummyRequest("/ws"))
+
+    assert response is fake_ws
+    assert fake_ws.sent[1] == {"type": "error", "message": "Invalid WebSocket payload"}
     assert server.state.connected_clients == []

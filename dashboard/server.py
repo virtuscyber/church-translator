@@ -8,6 +8,7 @@ translation status, transcript updates, and pipeline control.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 import math
@@ -96,37 +97,107 @@ async def auth_middleware(request: web.Request, handler):
 
 class AppState:
     """Shared state between dashboard and pipeline."""
-    running: bool = False
-    live_running: bool = False
-    connected_clients: list = []
-    transcript: list[dict] = []
-    stats: dict = {
-        "chunks_processed": 0,
-        "avg_latency": 0.0,
-        "total_runtime": 0.0,
-        "status": "stopped",
-    }
-    start_time: float = 0.0
-    live_pipeline = None
-    live_task = None
-    live_capture = None
-    live_playback = None
-    live_aes67 = None
+
+    def __init__(self):
+        self.running: bool = False
+        self.live_running: bool = False
+        self.connected_clients: list = []
+        self.transcript: list[dict] = []
+        self.stats: dict = {
+            "chunks_processed": 0,
+            "avg_latency": 0.0,
+            "total_runtime": 0.0,
+            "status": "stopped",
+        }
+        self.start_time: float = 0.0
+        self.live_pipeline = None
+        self.live_task = None
+        self.live_capture = None
+        self.live_playback = None
+        self.live_aes67 = None
+        self.audio_monitor_lock = asyncio.Lock()
 
 state = AppState()
+
+
+def _discard_client(ws) -> None:
+    """Remove a WebSocket from the client list if it is still present."""
+    with contextlib.suppress(ValueError):
+        state.connected_clients.remove(ws)
 
 
 async def broadcast(msg: dict):
     """Send a message to all connected WebSocket clients."""
     data = json.dumps(msg)
     dead = []
-    for ws in state.connected_clients:
+    for ws in list(state.connected_clients):
         try:
             await ws.send_str(data)
         except Exception:
             dead.append(ws)
     for ws in dead:
-        state.connected_clients.remove(ws)
+        _discard_client(ws)
+
+
+def _input_device_entries(sd) -> list[dict]:
+    """Return normalized metadata for every input-capable audio device."""
+    entries = []
+    for i, dev in enumerate(sd.query_devices()):
+        if dev["max_input_channels"] > 0:
+            sr = int(dev.get("default_samplerate") or 48000)
+            entries.append({
+                "index": i,
+                "name": dev["name"],
+                "sr": sr,
+                "channels": min(int(dev["max_input_channels"]), 1),
+            })
+    return entries
+
+
+def _sample_input_device_level(sd, np, *, device_index: int, sample_rate: int, channels: int, duration: float) -> tuple[float, float]:
+    """Capture a short blocking sample from an input device and return peak/rms dB."""
+    frames = max(1, int(sample_rate * duration))
+    sd.check_input_settings(
+        device=device_index,
+        samplerate=sample_rate,
+        channels=channels,
+        dtype="float32",
+    )
+
+    with sd.InputStream(
+        device=device_index,
+        samplerate=sample_rate,
+        channels=channels,
+        dtype="float32",
+        blocksize=frames,
+    ) as stream:
+        recording, overflowed = stream.read(frames)
+
+    if overflowed:
+        logger.debug("Audio level sample overflowed for device %s", device_index)
+
+    if recording is None or len(recording) == 0:
+        return -100.0, -100.0
+
+    audio = recording[:, 0] if getattr(recording, "ndim", 1) > 1 else recording
+    peak = float(np.max(np.abs(audio)))
+    rms = float(np.sqrt(np.mean(audio ** 2)))
+    peak_db = 20 * np.log10(peak) if peak > 1e-10 else -100.0
+    rms_db = 20 * np.log10(rms) if rms > 1e-10 else -100.0
+    return float(peak_db), float(rms_db)
+
+
+def _log_live_chunk_result(done_task: asyncio.Task) -> None:
+    """Consume background task exceptions so they don't surface as unhandled."""
+    if done_task.cancelled():
+        return
+    exc = done_task.exception()
+    if exc:
+        logger.error(
+            "Live chunk processing failed: %s",
+            exc,
+            exc_info=(type(exc), exc, exc.__traceback__),
+        )
 
 
 # ── HTTP Routes ─────────────────────────────────────────────────
@@ -257,52 +328,49 @@ async def api_audio_levels(request):
         import sounddevice as sd
         import numpy as np
 
-        devices = sd.query_devices()
-        input_devices = []
-        for i, dev in enumerate(devices):
-            if dev["max_input_channels"] > 0:
-                input_devices.append({"index": i, "name": dev["name"], "sr": dev["default_samplerate"]})
+        input_devices = _input_device_entries(sd)
 
         results = []
         loop = asyncio.get_running_loop()
 
-        def _sample_device(dev_index, sr):
-            """Record a short sample from one device and return its peak level."""
+        def _sample_device(dev_index, sr, channels):
+            """Record a short sample from one device and return its levels."""
             try:
-                sr_int = int(sr)
-                duration = 0.2  # 200ms sample
-                frames = int(sr_int * duration)
-                recording = sd.rec(frames, samplerate=sr_int, channels=1, dtype="float32", device=dev_index)
-                sd.wait()
-                if recording is None or len(recording) == 0:
-                    return -100.0
-                peak = float(np.max(np.abs(recording)))
-                if peak < 1e-10:
-                    return -100.0
-                return float(20 * np.log10(peak))
-            except Exception:
-                return None  # Device error
+                peak_db, _ = _sample_input_device_level(
+                    sd,
+                    np,
+                    device_index=dev_index,
+                    sample_rate=sr,
+                    channels=channels,
+                    duration=0.2,
+                )
+                return peak_db
+            except Exception as exc:
+                return exc
 
-        for dev in input_devices:
-            level_db = await loop.run_in_executor(None, _sample_device, dev["index"], dev["sr"])
-            if level_db is None:
-                results.append({
-                    "index": dev["index"],
-                    "name": dev["name"],
-                    "level_db": None,
-                    "level_pct": 0,
-                    "has_audio": False,
-                    "error": True,
-                })
-            else:
-                # Convert dB to percentage (0-100). -60dB = silence, 0dB = full scale
+        async with state.audio_monitor_lock:
+            for dev in input_devices:
+                result = await loop.run_in_executor(None, _sample_device, dev["index"], dev["sr"], dev["channels"])
+                if isinstance(result, Exception):
+                    logger.debug("Audio level scan failed for device %s: %s", dev["index"], result)
+                    results.append({
+                        "index": dev["index"],
+                        "name": dev["name"],
+                        "level_db": None,
+                        "level_pct": 0,
+                        "has_audio": False,
+                        "error": True,
+                    })
+                    continue
+
+                level_db = result
                 pct = max(0, min(100, int((level_db + 60) / 60 * 100)))
                 results.append({
                     "index": dev["index"],
                     "name": dev["name"],
                     "level_db": round(level_db, 1),
                     "level_pct": pct,
-                    "has_audio": level_db > -40,  # Above -40dB = likely has audio
+                    "has_audio": level_db > -40,
                 })
 
         return web.json_response({"devices": results})
@@ -318,30 +386,45 @@ async def api_audio_level_single(request):
         import sounddevice as sd
         import numpy as np
 
-        data = await request.json()
+        try:
+            data = await request.json()
+        except json.JSONDecodeError:
+            return web.json_response({"error": "Invalid JSON body"}, status=400)
+
         dev_index = data.get("device_index")
         if dev_index is None:
             return web.json_response({"error": "device_index required"}, status=400)
 
-        dev_index = int(dev_index)
-        dev_info = sd.query_devices(dev_index)
-        sr = int(dev_info["default_samplerate"])
+        try:
+            dev_index = int(dev_index)
+        except (TypeError, ValueError):
+            return web.json_response({"error": "device_index must be an integer"}, status=400)
+
+        try:
+            dev_info = sd.query_devices(dev_index)
+        except Exception as exc:
+            return web.json_response({"error": f"Invalid audio device: {exc}"}, status=400)
+
+        if dev_info["max_input_channels"] <= 0:
+            return web.json_response({"error": "Selected device is not an input device"}, status=400)
+
+        sr = int(dev_info.get("default_samplerate") or 48000)
+        channels = min(int(dev_info["max_input_channels"]), 1)
 
         loop = asyncio.get_running_loop()
 
         def _sample():
-            frames = int(sr * 0.1)  # 100ms for faster response
-            recording = sd.rec(frames, samplerate=sr, channels=1, dtype="float32", device=dev_index)
-            sd.wait()
-            if recording is None or len(recording) == 0:
-                return -100.0, 0.0
-            peak = float(np.max(np.abs(recording)))
-            rms = float(np.sqrt(np.mean(recording ** 2)))
-            peak_db = 20 * np.log10(peak) if peak > 1e-10 else -100.0
-            rms_db = 20 * np.log10(rms) if rms > 1e-10 else -100.0
-            return peak_db, rms_db
+            return _sample_input_device_level(
+                sd,
+                np,
+                device_index=dev_index,
+                sample_rate=sr,
+                channels=channels,
+                duration=0.1,
+            )
 
-        peak_db, rms_db = await loop.run_in_executor(None, _sample)
+        async with state.audio_monitor_lock:
+            peak_db, rms_db = await loop.run_in_executor(None, _sample)
         pct = max(0, min(100, int((peak_db + 60) / 60 * 100)))
 
         return web.json_response({
@@ -524,6 +607,7 @@ async def api_setup_save(request):
 
 async def _run_file_test(file_path: str):
     """Background task to run file translation and stream results."""
+    tmp_path = None
     try:
         from src.config import load_config
         from src.transcriber import Transcriber
@@ -573,8 +657,6 @@ async def _run_file_test(file_path: str):
             silence_threshold_sec=config.pipeline.silence_threshold_sec,
         )
         chunks = vad.chunk_file(tmp_path)
-        Path(tmp_path).unlink(missing_ok=True)
-
         await broadcast({"type": "info", "message": f"Processing {len(chunks)} chunks..."})
 
         # Find language names for display
@@ -654,6 +736,59 @@ async def _run_file_test(file_path: str):
         state.running = False
         state.stats["status"] = "error"
         await broadcast({"type": "error", "message": str(e)})
+    finally:
+        if tmp_path:
+            Path(tmp_path).unlink(missing_ok=True)
+
+
+async def _stop_live_pipeline(*, notify_clients: bool) -> None:
+    """Stop all live-translation resources and optionally broadcast status."""
+    state.live_running = False
+    state.running = False
+
+    if state.live_capture:
+        try:
+            await state.live_capture.stop()
+            logger.info("Live capture stopped")
+        except Exception as e:
+            logger.warning("Error stopping capture: %s", e)
+        state.live_capture = None
+
+    if state.live_aes67:
+        try:
+            state.live_aes67.stop()
+        except Exception as e:
+            logger.warning("Error stopping AES67: %s", e)
+        state.live_aes67 = None
+
+    if state.live_pipeline:
+        try:
+            await state.live_pipeline.stop()
+        except Exception as e:
+            logger.warning("Error stopping pipeline: %s", e)
+        state.live_pipeline = None
+
+    if state.live_task:
+        if not state.live_task.done():
+            state.live_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError, Exception):
+            await state.live_task
+        state.live_task = None
+
+    state.live_playback = None
+    state.stats["status"] = "stopped"
+    state.stats["total_runtime"] = time.time() - state.start_time if state.start_time else 0.0
+
+    if notify_clients:
+        await broadcast({
+            "type": "status",
+            "status": "stopped",
+            "stats": {
+                "chunks_processed": state.stats["chunks_processed"],
+                "avg_latency": round(state.stats["avg_latency"], 1),
+                "total_runtime": round(state.stats["total_runtime"], 1),
+            },
+        })
 
 
 # ── Live Translation Pipeline ──────────────────────────────────
@@ -682,62 +817,16 @@ async def api_stop_live(request):
     if not state.live_running:
         return web.json_response({"error": "Not running"}, status=400)
 
-    state.live_running = False
-    state.running = False
-
-    # Stop the audio capture (microphone) immediately
-    if state.live_capture:
-        try:
-            await state.live_capture.stop()
-            logger.info("Live capture stopped")
-        except Exception as e:
-            logger.warning("Error stopping capture: %s", e)
-        state.live_capture = None
-
-    # Stop AES67 output
-    if state.live_aes67:
-        try:
-            state.live_aes67.stop()
-        except Exception as e:
-            logger.warning("Error stopping AES67: %s", e)
-        state.live_aes67 = None
-
-    # Stop the pipeline (if set)
-    if state.live_pipeline:
-        try:
-            await state.live_pipeline.stop()
-        except Exception as e:
-            logger.warning("Error stopping pipeline: %s", e)
-        state.live_pipeline = None
-
-    # Cancel the background task
-    if state.live_task and not state.live_task.done():
-        state.live_task.cancel()
-        try:
-            await state.live_task
-        except (asyncio.CancelledError, Exception):
-            pass
-        state.live_task = None
-
-    state.live_playback = None
-
-    state.stats["status"] = "stopped"
-    state.stats["total_runtime"] = time.time() - state.start_time
-
-    await broadcast({
-        "type": "status",
-        "status": "stopped",
-        "stats": {
-            "chunks_processed": state.stats["chunks_processed"],
-            "avg_latency": round(state.stats["avg_latency"], 1),
-            "total_runtime": round(state.stats["total_runtime"], 1),
-        },
-    })
+    await _stop_live_pipeline(notify_clients=True)
     return web.json_response({"status": "stopped"})
 
 
 async def _run_live_pipeline():
     """Background task running the live translation pipeline with dashboard integration."""
+    playback_queue = None
+    playback_task = None
+    processing_tasks = set()
+    playback_active = False
     try:
         from src.config import load_config
         from src.transcriber import Transcriber
@@ -931,7 +1020,6 @@ async def _run_live_pipeline():
 
         # Main loop: capture overlaps with processing
         # We process chunks concurrently (up to 2 at a time) so capture never stalls
-        processing_tasks = set()
         MAX_CONCURRENT = 2
 
         while state.live_running:
@@ -948,6 +1036,7 @@ async def _run_live_pipeline():
             task = asyncio.create_task(_process_chunk(wav_bytes, chunk_count))
             processing_tasks.add(task)
             task.add_done_callback(processing_tasks.discard)
+            task.add_done_callback(_log_live_chunk_result)
 
             # If at max concurrency, wait for one to finish before accepting next
             if len(processing_tasks) >= MAX_CONCURRENT:
@@ -958,22 +1047,26 @@ async def _run_live_pipeline():
         if processing_tasks:
             await asyncio.gather(*processing_tasks, return_exceptions=True)
 
-        # Signal playback worker to stop after draining queue
-        playback_active = False
-        await playback_queue.put(None)
-        await playback_task
-
-        # Cleanup
-        await capture.stop()
-        if aes67:
-            aes67.stop()
-
     except asyncio.CancelledError:
         logger.info("Live pipeline cancelled")
     except Exception as e:
         logger.error("Live pipeline error: %s", e, exc_info=True)
         await broadcast({"type": "error", "message": f"Live translation error: {e}"})
     finally:
+        if processing_tasks:
+            for task in list(processing_tasks):
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(*processing_tasks, return_exceptions=True)
+
+        if playback_queue is not None:
+            playback_active = False
+            with contextlib.suppress(asyncio.QueueFull):
+                await playback_queue.put(None)
+        if playback_task:
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await playback_task
+
         # Ensure all audio resources are released
         if state.live_capture:
             try:
@@ -993,6 +1086,7 @@ async def _run_live_pipeline():
         state.stats["status"] = "stopped"
         state.stats["total_runtime"] = time.time() - state.start_time
         state.live_pipeline = None
+        state.live_task = None
         logger.info("Live pipeline fully stopped and cleaned up")
 
 
@@ -1098,22 +1192,38 @@ async def websocket_handler(request):
     try:
         async for msg in ws:
             if msg.type == web.WSMsgType.TEXT:
-                data = json.loads(msg.data)
+                try:
+                    data = json.loads(msg.data)
+                except json.JSONDecodeError:
+                    await ws.send_json({"type": "error", "message": "Invalid WebSocket payload"})
+                    continue
                 if data.get("action") == "ping":
                     await ws.send_json({"type": "pong"})
             elif msg.type == web.WSMsgType.ERROR:
                 logger.error("WebSocket error: %s", ws.exception())
     finally:
-        state.connected_clients.remove(ws)
+        _discard_client(ws)
         logger.info("Dashboard client disconnected (%d remaining)", len(state.connected_clients))
 
     return ws
+
+
+async def on_shutdown(app):
+    """Release live audio resources and close WebSockets on server shutdown."""
+    if state.live_running or state.live_task:
+        await _stop_live_pipeline(notify_clients=False)
+
+    for ws in list(state.connected_clients):
+        with contextlib.suppress(Exception):
+            await ws.close()
+        _discard_client(ws)
 
 
 # ── App Setup ───────────────────────────────────────────────────
 
 def create_app():
     app = web.Application(middlewares=[auth_middleware])
+    app.on_shutdown.append(on_shutdown)
     app.router.add_get("/", index)
     app.router.add_get("/ws", websocket_handler)
     app.router.add_get("/api/status", api_status)

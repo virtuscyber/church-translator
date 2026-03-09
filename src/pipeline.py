@@ -106,11 +106,10 @@ class TranslationPipeline:
         logger.info("=" * 60)
 
         self._running = True
-        if self.aes67:
-            self.aes67.start()
-        await self.capture.start()
-
         try:
+            if self.aes67:
+                self.aes67.start()
+            await self.capture.start()
             while self._running:
                 await self._process_one_chunk()
         except KeyboardInterrupt:

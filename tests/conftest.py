@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -56,6 +57,10 @@ def reset_dashboard_state(monkeypatch, tmp_path):
     server.state.start_time = 0.0
     server.state.live_pipeline = None
     server.state.live_task = None
+    server.state.live_capture = None
+    server.state.live_playback = None
+    server.state.live_aes67 = None
+    server.state.audio_monitor_lock = asyncio.Lock()
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     monkeypatch.delenv("ELEVENLABS_API_KEY", raising=False)
     yield
