@@ -105,6 +105,11 @@ class VADChunker:
         self._silence_frames = 0
         self._speech_frames_total = 0
         
+        # Track silence gaps for smart force-splitting
+        # Each entry: (buffer_seconds_at_gap, gap_duration_frames)
+        self._silence_gaps: deque = deque(maxlen=50)
+        self._current_gap_start: Optional[float] = None
+        
         # Leftover audio from last feed that didn't fill a frame
         self._leftover = np.array([], dtype=np.float32)
 
@@ -133,24 +138,35 @@ class VADChunker:
             is_speech = self.vad.is_speech(frame)
             
             if is_speech:
+                # Track end of silence gap
+                if self._silence_frames > 0 and self._current_gap_start is not None:
+                    gap_duration = self._silence_frames * FRAME_MS / 1000.0
+                    if gap_duration >= 0.15:  # Only track meaningful gaps (>150ms)
+                        self._silence_gaps.append((self._current_gap_start, gap_duration))
+                    self._current_gap_start = None
+                
                 self._silence_frames = 0
                 self._speech_frames_total += 1
                 if not self._speech_started:
                     self._speech_started = True
             else:
+                if self._silence_frames == 0:
+                    self._current_gap_start = self._buffered_seconds
                 self._silence_frames += 1
             
             silence_duration = self._silence_frames * FRAME_MS / 1000.0
             
             if self._speech_started:
+                # Natural pause boundary — ideal split point
                 if (silence_duration >= self.silence_threshold_sec 
                         and self._buffered_seconds >= self.min_chunk_sec):
                     chunk = self._emit_chunk()
                     if chunk:
                         chunks_out.append(chunk)
                 
+                # Force-split at max duration — find best split point
                 elif self._buffered_seconds >= self.max_chunk_sec:
-                    chunk = self._emit_chunk()
+                    chunk = self._emit_chunk_smart()
                     if chunk:
                         chunks_out.append(chunk)
         
@@ -164,6 +180,61 @@ class VADChunker:
         if self._audio_buffer and self._buffered_seconds >= 0.5:
             return self._emit_chunk()
         return None
+
+    def _emit_chunk_smart(self) -> Optional[bytes]:
+        """Force-emit at max duration but split at the best silence gap.
+        
+        Instead of cutting mid-word at exactly max_chunk_sec, look back
+        through recent silence gaps and split at the longest one (most
+        likely a sentence boundary). Remainder stays in buffer for the
+        next chunk, preserving continuity.
+        """
+        if not self._audio_buffer or not self._silence_gaps:
+            # No gaps tracked — fall back to regular emit
+            return self._emit_chunk()
+        
+        # Find the longest silence gap in the back half of the buffer
+        # (prefer splitting later to keep chunks substantial)
+        half_point = self._buffered_seconds * 0.4  # Only consider gaps after 40%
+        best_gap = None
+        best_duration = 0.0
+        
+        for gap_time, gap_dur in self._silence_gaps:
+            if gap_time >= half_point and gap_dur > best_duration:
+                best_gap = gap_time
+                best_duration = gap_dur
+        
+        if best_gap is None:
+            return self._emit_chunk()
+        
+        # Split at the best gap
+        all_audio = np.concatenate(self._audio_buffer, axis=0)
+        split_sample = int(best_gap * self.input_sample_rate)
+        
+        # Add padding after the split point
+        padding_samples = int(self.padding_sec * self.input_sample_rate)
+        split_sample = min(split_sample + padding_samples, len(all_audio))
+        
+        chunk_audio = all_audio[:split_sample]
+        remainder = all_audio[split_sample:]
+        
+        duration = len(chunk_audio) / self.input_sample_rate
+        logger.info(
+            "VAD smart split: %.1fs chunk (split at %.1fs silence gap of %.2fs, %.1fs remainder)",
+            duration, best_gap, best_duration, len(remainder) / self.input_sample_rate,
+        )
+        
+        # Reset state, keeping remainder in buffer
+        self._audio_buffer = [remainder] if len(remainder) > 0 else []
+        self._buffered_seconds = len(remainder) / self.input_sample_rate
+        self._speech_started = len(remainder) > 0
+        self._silence_frames = 0
+        self._speech_frames_total = 0
+        self._silence_gaps.clear()
+        self._current_gap_start = None
+        self._leftover = np.array([], dtype=np.float32)
+        
+        return self._to_wav(chunk_audio)
 
     def _emit_chunk(self) -> Optional[bytes]:
         """Concatenate buffered audio and return as WAV bytes, then reset."""
@@ -200,6 +271,8 @@ class VADChunker:
         self._speech_started = False
         self._silence_frames = 0
         self._speech_frames_total = 0
+        self._silence_gaps.clear()
+        self._current_gap_start = None
         self._leftover = np.array([], dtype=np.float32)
         
         return self._to_wav(chunk_audio)

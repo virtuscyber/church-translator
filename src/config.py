@@ -77,11 +77,25 @@ class PipelineConfig:
     buffer_silence_sec: float = 2.0
     context_sentences: int = 2
     # VAD settings (Phase 2)
+    # Tuned for church sermon translation: balance context vs latency
     use_vad: bool = True
-    vad_aggressiveness: int = 2  # 0-3, higher = more aggressive filtering
-    min_chunk_sec: float = 3.0   # Minimum speech segment duration
-    max_chunk_sec: float = 15.0  # Maximum before force-split
-    silence_threshold_sec: float = 0.8  # Silence duration to trigger split
+    vad_aggressiveness: int = 2   # 0-3, higher = more aggressive filtering
+                                   #   1 = quiet room, clear mic
+                                   #   2 = typical church (some reverb/ambient)
+                                   #   3 = noisy environment (music, crowd)
+    min_chunk_sec: float = 2.0    # Minimum speech before emitting a chunk
+                                   #   Lower = faster response on short phrases
+                                   #   Higher = more context for translation accuracy
+                                   #   2.0s catches short sentences without over-buffering
+    max_chunk_sec: float = 8.0    # Force-split even during continuous speech
+                                   #   This is the WORST-CASE latency floor:
+                                   #   end-to-end ≈ max_chunk + STT(~2s) + translate(~1s) + TTS(~1s)
+                                   #   8s → ~12s worst case (was 15s → ~20s)
+                                   #   Lower = less latency but may split mid-sentence
+    silence_threshold_sec: float = 0.6  # Silence duration to trigger chunk boundary
+                                         #   0.6s = natural sentence pause in sermon speech
+                                         #   0.8s was slightly too conservative (missed quicker pauses)
+                                         #   0.4s = too aggressive (splits on breath pauses)
 
 
 @dataclass
