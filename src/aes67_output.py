@@ -52,7 +52,7 @@ def _build_sdp(
         f"m=audio {port} RTP/AVP {_RTP_PAYLOAD_TYPE}\r\n"
         f"a=rtpmap:{_RTP_PAYLOAD_TYPE} L24/{_AES67_SAMPLE_RATE}/{_AES67_CHANNELS}\r\n"
         f"a=ptime:{_AES67_PACKET_TIME_MS}\r\n"
-        "a=recvonly\r\n"
+        "a=sendonly\r\n"
         f"a=clock-domain:PTPv2 0\r\n"
     )
 
@@ -177,10 +177,19 @@ class AES67Sender:
         # RTP multicast socket
         self._rtp_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
         self._rtp_sock.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_TTL, self.ttl)
+        # Bind multicast to the correct interface (critical on Windows with multiple NICs)
+        self._rtp_sock.setsockopt(
+            socket.IPPROTO_IP, socket.IP_MULTICAST_IF,
+            socket.inet_aton(self._origin_addr),
+        )
 
         # SAP multicast socket (SAP uses 239.255.255.255:9875)
         self._sap_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
         self._sap_sock.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_TTL, self.ttl)
+        self._sap_sock.setsockopt(
+            socket.IPPROTO_IP, socket.IP_MULTICAST_IF,
+            socket.inet_aton(self._origin_addr),
+        )
 
         self._running = True
 
