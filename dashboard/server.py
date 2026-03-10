@@ -139,6 +139,20 @@ async def broadcast(msg: dict):
         _discard_client(ws)
 
 
+def _device_fingerprint(dev: dict) -> str:
+    """Create a stable fingerprint for a device based on name + channel config.
+
+    Device indices can shift between reboots or when USB devices are
+    plugged/unplugged.  The fingerprint lets us match a remembered device
+    even when its index changes.
+    """
+    name = dev.get("name", "")
+    max_in = int(dev.get("max_input_channels", 0))
+    max_out = int(dev.get("max_output_channels", 0))
+    sr = int(dev.get("default_samplerate", 0))
+    return f"{name}|{max_in}|{max_out}|{sr}"
+
+
 def _input_device_entries(sd) -> list[dict]:
     """Return normalized metadata for every input-capable audio device."""
     entries = []
@@ -277,17 +291,218 @@ async def api_devices(request):
         import sounddevice as sd
         devices = sd.query_devices()
         result = {"input": [], "output": []}
+
+        # Load saved config for remembered devices
+        saved = load_saved_config()
+        remembered_input = saved.get("preferred_input_fingerprint", "")
+        remembered_output = saved.get("preferred_output_fingerprint", "")
+
         for i, dev in enumerate(devices):
-            entry = {"index": i, "name": dev["name"], "sample_rate": dev["default_samplerate"]}
+            entry = {
+                "index": i,
+                "name": dev["name"],
+                "sample_rate": dev["default_samplerate"],
+                "fingerprint": _device_fingerprint(dev),
+            }
             if dev["max_input_channels"] > 0:
+                entry["remembered"] = (entry["fingerprint"] == remembered_input) if remembered_input else False
                 result["input"].append(entry)
             if dev["max_output_channels"] > 0:
+                entry["remembered"] = (entry["fingerprint"] == remembered_output) if remembered_output else False
                 result["output"].append(entry)
         return web.json_response(result)
     except ImportError:
         return web.json_response({"input": [], "output": [], "error": "sounddevice not installed"})
     except Exception as e:
         return web.json_response({"input": [], "output": [], "error": str(e)})
+
+
+async def api_probe_devices(request):
+    """Probe all audio devices to determine which are functional.
+
+    For each input device: tries to open a short stream and read frames.
+    For each output device: tries to open a stream and write silence.
+    Returns devices grouped and sorted:
+      - remembered device first (if still present)
+      - devices with live signal next
+      - working but silent devices
+      - failed/unusable devices last
+
+    Also returns a ``recommended`` field with the best input and output
+    device indices for quick auto-selection.
+    """
+    try:
+        import sounddevice as sd
+        import numpy as np
+
+        loop = asyncio.get_running_loop()
+        devices = sd.query_devices()
+        saved = load_saved_config()
+        remembered_input_fp = saved.get("preferred_input_fingerprint", "")
+        remembered_output_fp = saved.get("preferred_output_fingerprint", "")
+
+        input_results = []
+        output_results = []
+
+        def _probe_input(idx, dev):
+            """Probe a single input device — returns dict with status."""
+            fp = _device_fingerprint(dev)
+            sr = int(dev.get("default_samplerate") or 48000)
+            channels = min(int(dev["max_input_channels"]), 1)
+            entry = {
+                "index": idx,
+                "name": dev["name"],
+                "sample_rate": sr,
+                "fingerprint": fp,
+                "remembered": (fp == remembered_input_fp) if remembered_input_fp else False,
+                "usable": False,
+                "has_signal": False,
+                "level_db": None,
+                "level_pct": 0,
+                "error": None,
+            }
+            try:
+                peak_db, rms_db = _sample_input_device_level(
+                    sd, np,
+                    device_index=idx,
+                    sample_rate=sr,
+                    channels=channels,
+                    duration=0.25,
+                )
+                entry["usable"] = True
+                entry["level_db"] = round(peak_db, 1)
+                entry["level_pct"] = max(0, min(100, int((peak_db + 60) / 60 * 100)))
+                entry["has_signal"] = peak_db > -40
+            except Exception as exc:
+                entry["error"] = str(exc)
+            return entry
+
+        def _probe_output(idx, dev):
+            """Probe a single output device — tries to write silence."""
+            fp = _device_fingerprint(dev)
+            sr = int(dev.get("default_samplerate") or 48000)
+            channels = min(int(dev["max_output_channels"]), 2)
+            entry = {
+                "index": idx,
+                "name": dev["name"],
+                "sample_rate": sr,
+                "fingerprint": fp,
+                "remembered": (fp == remembered_output_fp) if remembered_output_fp else False,
+                "usable": False,
+                "error": None,
+            }
+            try:
+                sd.check_output_settings(
+                    device=idx,
+                    samplerate=sr,
+                    channels=channels,
+                    dtype="float32",
+                )
+                entry["usable"] = True
+            except Exception as exc:
+                entry["error"] = str(exc)
+            return entry
+
+        # Probe all devices (serialized via executor to avoid PortAudio conflicts)
+        async with state.audio_monitor_lock:
+            for i, dev in enumerate(devices):
+                if dev["max_input_channels"] > 0:
+                    result = await loop.run_in_executor(None, _probe_input, i, dev)
+                    input_results.append(result)
+                if dev["max_output_channels"] > 0:
+                    result = await loop.run_in_executor(None, _probe_output, i, dev)
+                    output_results.append(result)
+
+        # Sort: remembered first, then signal, then usable, then failed
+        def _input_sort_key(d):
+            return (
+                0 if d["remembered"] else 1,
+                0 if d["has_signal"] else 1,
+                0 if d["usable"] else 1,
+                d["name"],
+            )
+
+        def _output_sort_key(d):
+            return (
+                0 if d["remembered"] else 1,
+                0 if d["usable"] else 1,
+                d["name"],
+            )
+
+        input_results.sort(key=_input_sort_key)
+        output_results.sort(key=_output_sort_key)
+
+        # Recommend best device for each role
+        recommended = {"input": None, "output": None}
+
+        # Input: prefer remembered → has_signal → first usable
+        for d in input_results:
+            if d["remembered"] and d["usable"]:
+                recommended["input"] = d["index"]
+                break
+        if recommended["input"] is None:
+            for d in input_results:
+                if d["has_signal"]:
+                    recommended["input"] = d["index"]
+                    break
+        if recommended["input"] is None:
+            for d in input_results:
+                if d["usable"]:
+                    recommended["input"] = d["index"]
+                    break
+
+        # Output: prefer remembered → first usable
+        for d in output_results:
+            if d["remembered"] and d["usable"]:
+                recommended["output"] = d["index"]
+                break
+        if recommended["output"] is None:
+            for d in output_results:
+                if d["usable"]:
+                    recommended["output"] = d["index"]
+                    break
+
+        return web.json_response({
+            "input": input_results,
+            "output": output_results,
+            "recommended": recommended,
+        })
+
+    except ImportError:
+        return web.json_response({"input": [], "output": [], "recommended": {}, "error": "sounddevice not installed"})
+    except Exception as e:
+        logger.error("Device probe failed: %s", e, exc_info=True)
+        return web.json_response({"input": [], "output": [], "recommended": {}, "error": str(e)})
+
+
+async def api_remember_device(request):
+    """Save a device fingerprint as the preferred device for its role.
+
+    Body: {"role": "input"|"output", "device_index": <int>}
+    Stores the device fingerprint (not index) so it survives reboots.
+    """
+    try:
+        import sounddevice as sd
+        data = await request.json()
+        role = data.get("role")
+        device_index = data.get("device_index")
+
+        if role not in ("input", "output"):
+            return web.json_response({"error": "role must be 'input' or 'output'"}, status=400)
+        if device_index is None:
+            return web.json_response({"error": "device_index required"}, status=400)
+
+        device_index = int(device_index)
+        dev = sd.query_devices(device_index)
+        fp = _device_fingerprint(dev)
+
+        key = f"preferred_{role}_fingerprint"
+        save_config({key: fp, f"{role}_device": device_index})
+
+        logger.info("Remembered %s device: %s (fingerprint: %s)", role, dev["name"], fp)
+        return web.json_response({"ok": True, "fingerprint": fp, "name": dev["name"]})
+    except Exception as e:
+        return web.json_response({"ok": False, "error": str(e)}, status=500)
 
 
 async def api_test_output(request):
@@ -450,7 +665,7 @@ async def api_save_config(request):
     """Save device/language config."""
     data = await request.json()
     # Only allow safe keys
-    allowed = {"input_device", "output_device", "source_language", "target_language", "custom_vocabulary", "elevenlabs_voice_id", "stt_model", "translation_model", "tts_model"}
+    allowed = {"input_device", "output_device", "source_language", "target_language", "custom_vocabulary", "elevenlabs_voice_id", "stt_model", "translation_model", "tts_model", "preferred_input_fingerprint", "preferred_output_fingerprint"}
     filtered = {k: v for k, v in data.items() if k in allowed}
     save_config(filtered)
     return web.json_response({"ok": True})
@@ -1337,6 +1552,8 @@ def create_app():
     app.router.add_post("/api/test-file", api_test_file)
     # Feature 1: Audio devices
     app.router.add_get("/api/devices", api_devices)
+    app.router.add_get("/api/devices/probe", api_probe_devices)
+    app.router.add_post("/api/devices/remember", api_remember_device)
     app.router.add_post("/api/test-output", api_test_output)
     app.router.add_get("/api/audio-levels", api_audio_levels)
     app.router.add_post("/api/audio-level", api_audio_level_single)
