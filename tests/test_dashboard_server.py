@@ -10,10 +10,11 @@ import pytest
 
 
 class DummyRequest:
-    def __init__(self, path: str, data: dict | None = None, headers: dict | None = None):
+    def __init__(self, path: str, data: dict | None = None, headers: dict | None = None, query: dict | None = None):
         self.path = path
         self._data = data or {}
         self.headers = headers or {}
+        self.query = query or {}
 
     async def json(self):
         return self._data
@@ -229,6 +230,59 @@ async def test_live_start_and_stop_are_graceful_without_real_services(monkeypatc
     stop = await server.api_stop_live(DummyRequest("/api/stop-live"))
     assert stop.status == 200
     assert decode_json_response(stop)["status"] == "stopped"
+
+
+@pytest.mark.asyncio
+async def test_test_file_rejects_when_pipeline_is_busy(tmp_path):
+    from dashboard import server
+
+    wav_path = tmp_path / "sample.wav"
+    wav_path.write_bytes(b"fake")
+    server.state.live_running = True
+
+    response = await server.api_test_file(
+        DummyRequest("/api/test-file", data={"file_path": str(wav_path)})
+    )
+
+    assert response.status == 400
+    assert decode_json_response(response) == {"error": "Already running"}
+
+
+@pytest.mark.asyncio
+async def test_auth_middleware_allows_setup_only_before_configuration(monkeypatch):
+    from aiohttp import web
+    from dashboard import server
+
+    server.DASHBOARD_API_KEY = "secret"
+
+    async def handler(request):
+        return web.json_response({"ok": True})
+
+    monkeypatch.setattr(server, "_has_configured_openai_key", lambda: False)
+    allowed = await server.auth_middleware(DummyRequest("/api/setup/status"), handler)
+    assert allowed.status == 200
+
+    monkeypatch.setattr(server, "_has_configured_openai_key", lambda: True)
+    blocked = await server.auth_middleware(DummyRequest("/api/setup/status"), handler)
+    assert blocked.status == 401
+
+
+@pytest.mark.asyncio
+async def test_auth_middleware_accepts_websocket_query_token():
+    from aiohttp import web
+    from dashboard import server
+
+    server.DASHBOARD_API_KEY = "secret"
+
+    async def handler(request):
+        return web.json_response({"ok": True})
+
+    response = await server.auth_middleware(
+        DummyRequest("/ws", query={"token": "secret"}),
+        handler,
+    )
+
+    assert response.status == 200
 
 
 @pytest.mark.asyncio

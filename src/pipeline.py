@@ -138,9 +138,13 @@ class TranslationPipeline:
         t0 = time.monotonic()
 
         # 1. Capture audio chunk
-        wav_bytes = await self.capture.get_chunk()
-        if wav_bytes is None:
+        captured = await self.capture.get_chunk()
+        if captured is None:
             return
+        if isinstance(captured, tuple):
+            _tag, wav_bytes = captured
+        else:
+            wav_bytes = captured
 
         t_capture = time.monotonic()
 
