@@ -37,6 +37,8 @@ class VADAudioCapture:
         min_chunk_sec: float = 3.0,
         max_chunk_sec: float = 15.0,
         silence_threshold_sec: float = 0.8,
+        enable_preview: bool = False,
+        preview_after_sec: float = 2.0,
     ):
         self.device = device
         self.sample_rate = sample_rate
@@ -48,10 +50,13 @@ class VADAudioCapture:
             max_chunk_sec=max_chunk_sec,
             silence_threshold_sec=silence_threshold_sec,
             input_sample_rate=sample_rate,
+            enable_preview=enable_preview,
+            preview_after_sec=preview_after_sec,
         )
 
         self._stream = None
-        self._chunk_queue: asyncio.Queue[bytes] = asyncio.Queue()
+        # Queue holds (tag, wav_bytes) tuples: tag is "preview" or "final"
+        self._chunk_queue: asyncio.Queue[tuple[str, bytes]] = asyncio.Queue()
         self._running = False
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._chunker_lock = threading.Lock()
@@ -65,11 +70,11 @@ class VADAudioCapture:
         audio = indata[:, 0] if indata.ndim > 1 else indata.flatten()
 
         with self._chunker_lock:
-            chunks = self._chunker.feed(audio)
-        for chunk in chunks:
+            tagged_chunks = self._chunker.feed(audio)
+        for tagged_chunk in tagged_chunks:
             if self._loop:
                 try:
-                    self._loop.call_soon_threadsafe(self._chunk_queue.put_nowait, chunk)
+                    self._loop.call_soon_threadsafe(self._chunk_queue.put_nowait, tagged_chunk)
                 except RuntimeError:
                     logger.debug("Event loop closed before queued VAD chunk could be delivered")
 
@@ -108,20 +113,21 @@ class VADAudioCapture:
         with self._chunker_lock:
             final = self._chunker.flush()
         if final:
-            self._chunk_queue.put_nowait(final)
+            self._chunk_queue.put_nowait(("final", final))
         
         logger.info("VAD capture stopped.")
 
-    async def get_chunk(self) -> Optional[bytes]:
+    async def get_chunk(self) -> Optional[tuple[str, bytes]]:
         """Wait for the next speech-bounded chunk.
         
-        Returns WAV bytes when a speech segment is detected,
-        or None if capture has stopped.
+        Returns:
+            (tag, wav_bytes) where tag is "preview" or "final",
+            or None if capture has stopped.
         """
         while self._running or not self._chunk_queue.empty():
             try:
-                chunk = await asyncio.wait_for(self._chunk_queue.get(), timeout=0.5)
-                return chunk
+                tagged = await asyncio.wait_for(self._chunk_queue.get(), timeout=0.5)
+                return tagged
             except asyncio.TimeoutError:
                 continue
         return None

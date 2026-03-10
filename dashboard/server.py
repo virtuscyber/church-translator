@@ -876,6 +876,8 @@ async def _run_live_pipeline():
             min_chunk_sec=config.pipeline.min_chunk_sec,
             max_chunk_sec=config.pipeline.max_chunk_sec,
             silence_threshold_sec=config.pipeline.silence_threshold_sec,
+            enable_preview=True,
+            preview_after_sec=config.pipeline.min_chunk_sec,
         )
 
         transcriber = Transcriber(
@@ -962,13 +964,21 @@ async def _run_live_pipeline():
 
         playback_task = asyncio.create_task(_playback_worker())
 
-        async def _process_chunk(wav_bytes, seq):
-            """Process a single chunk: STT → Translate → TTS (queued)."""
+        async def _process_chunk(wav_bytes, seq, pre_transcribed=None):
+            """Process a single chunk: STT → Translate → TTS (queued).
+            
+            If pre_transcribed is provided (from speculative STT), skips the
+            STT step entirely — saving 1-2 seconds of processing time.
+            """
             nonlocal total_latency
             t0 = time.time()
 
-            # STT
-            src_text = await transcriber.transcribe(wav_bytes)
+            # STT — use speculative result if available
+            if pre_transcribed:
+                src_text = pre_transcribed
+                logger.info("Skipped STT (using speculative result): %.2fs saved", 0)
+            else:
+                src_text = await transcriber.transcribe(wav_bytes)
             if not src_text:
                 return
 
@@ -1025,22 +1035,68 @@ async def _run_live_pipeline():
                     tts_started = True
                 await playback_queue.put(audio_chunk)
 
-        # Main loop: capture overlaps with processing
-        # We process chunks concurrently (up to 2 at a time) so capture never stalls
+        # Main loop with speculative STT:
+        # 1. When VAD emits a "preview", start STT speculatively
+        # 2. When "final" arrives, use speculative result if ready, or transcribe full chunk
+        # This overlaps STT processing with VAD capture, saving 1-2s
         MAX_CONCURRENT = 2
+        speculative_stt_task: Optional[asyncio.Task] = None
+        speculative_stt_result: Optional[str] = None
+
+        async def _speculative_transcribe(wav_bytes: bytes):
+            """Run STT on preview audio in background."""
+            nonlocal speculative_stt_result
+            try:
+                result = await transcriber.transcribe(wav_bytes)
+                speculative_stt_result = result
+                logger.info("Speculative STT complete: %s", 
+                           (result[:60] + "...") if result and len(result) > 60 else result)
+            except Exception as e:
+                logger.warning("Speculative STT failed: %s", e)
+                speculative_stt_result = None
 
         while state.live_running:
             try:
-                wav_bytes = await capture.get_chunk()
+                tagged = await capture.get_chunk()
             except Exception:
                 if not state.live_running:
                     break
                 continue
-            if wav_bytes is None:
+            if tagged is None:
                 continue
 
+            tag, wav_bytes = tagged
+
+            if tag == "preview":
+                # Start speculative STT in background — don't block capture
+                if speculative_stt_task is None or speculative_stt_task.done():
+                    speculative_stt_result = None
+                    speculative_stt_task = asyncio.create_task(
+                        _speculative_transcribe(wav_bytes)
+                    )
+                    logger.info("Speculative STT started on preview chunk")
+                continue
+
+            # tag == "final" — process the complete chunk
             chunk_count += 1
-            task = asyncio.create_task(_process_chunk(wav_bytes, chunk_count))
+
+            # Check if speculative STT already has our answer
+            pre_transcribed = None
+            if speculative_stt_task is not None:
+                if speculative_stt_task.done() and speculative_stt_result:
+                    pre_transcribed = speculative_stt_result
+                    logger.info("Using speculative STT result (saved STT wait time!)")
+                else:
+                    # Cancel pending speculative — we'll transcribe the full chunk
+                    if not speculative_stt_task.done():
+                        speculative_stt_task.cancel()
+                        logger.info("Speculative STT not ready, transcribing full chunk")
+                speculative_stt_task = None
+                speculative_stt_result = None
+
+            task = asyncio.create_task(
+                _process_chunk(wav_bytes, chunk_count, pre_transcribed=pre_transcribed)
+            )
             processing_tasks.add(task)
             task.add_done_callback(processing_tasks.discard)
             task.add_done_callback(_log_live_chunk_result)
