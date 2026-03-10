@@ -652,11 +652,14 @@
         <!-- Audio Devices -->
         <div class="form-row">
             <div class="form-group">
-                <label>Microphone (Input)</label>
-                <select id="inputDevice"><option value="">Loading devices...</option></select>
+                <label>Microphone (Input) <span id="inputProbeStatus" style="font-size:0.75em;color:var(--text-dim);"></span></label>
+                <div style="display:flex;gap:8px;">
+                    <select id="inputDevice" style="flex:1;"><option value="">Loading devices...</option></select>
+                    <button class="btn btn-secondary btn-sm" id="probeBtn" onclick="probeDevices()" title="Scan devices to find working ones">🔬 Probe</button>
+                </div>
             </div>
             <div class="form-group">
-                <label>Speaker (Output)</label>
+                <label>Speaker (Output) <span id="outputProbeStatus" style="font-size:0.75em;color:var(--text-dim);"></span></label>
                 <div style="display:flex;gap:8px;">
                     <select id="outputDevice" style="flex:1;"><option value="">Loading devices...</option></select>
                     <button class="btn btn-secondary btn-sm" onclick="testOutput()" title="Play test sound">🔊 Test</button>
@@ -671,7 +674,8 @@
                 <button class="btn btn-secondary btn-sm" id="scanBtn" onclick="toggleAudioScan()">🔍 Scan All Inputs</button>
             </div>
             <div id="audioMonitorHint" style="font-size:0.8em;color:var(--text-dim);margin-bottom:8px;">
-                Click "Scan All Inputs" to see which devices have live audio. Green bars = active audio source.
+                💡 <strong>New:</strong> Click <strong>🔬 Probe</strong> above to auto-detect working devices and find the one with live signal.
+                Or use "Scan All Inputs" for continuous monitoring. Your device choice is remembered for next time.
             </div>
             <div id="audioLevelBars" style="display:none;"></div>
             <div id="selectedDeviceLevel" style="margin-top:8px;display:none;">
@@ -964,8 +968,8 @@
         try {
             const res = await fetch('/api/devices');
             const data = await res.json();
-            populateDeviceSelect('inputDevice', data.input || []);
-            populateDeviceSelect('outputDevice', data.output || []);
+            populateDeviceSelect('inputDevice', data.input || [], 'input');
+            populateDeviceSelect('outputDevice', data.output || [], 'output');
         } catch (e) {
             console.error('Failed to load devices:', e);
             document.getElementById('inputDevice').innerHTML = '<option value="">No devices available</option>';
@@ -973,15 +977,127 @@
         }
     }
 
-    function populateDeviceSelect(id, devices) {
+    function populateDeviceSelect(id, devices, role) {
         const sel = document.getElementById(id);
         sel.innerHTML = '<option value="">System Default</option>';
+
+        // Sort: remembered first, then by name
+        const sorted = [...devices].sort((a, b) => {
+            if (a.remembered && !b.remembered) return -1;
+            if (!a.remembered && b.remembered) return 1;
+            return a.name.localeCompare(b.name);
+        });
+
+        sorted.forEach(d => {
+            const opt = document.createElement('option');
+            opt.value = d.index;
+            let label = d.name;
+            if (d.remembered) label = '⭐ ' + label;
+            opt.textContent = label;
+            sel.appendChild(opt);
+        });
+
+        // Auto-select remembered device
+        const remembered = sorted.find(d => d.remembered);
+        if (remembered) {
+            sel.value = remembered.index;
+            const statusEl = document.getElementById(role + 'ProbeStatus');
+            if (statusEl) statusEl.textContent = '⭐ Remembered device auto-selected';
+        }
+    }
+
+    let probeInProgress = false;
+
+    async function probeDevices() {
+        if (probeInProgress) return;
+        probeInProgress = true;
+        const btn = document.getElementById('probeBtn');
+        btn.textContent = '⏳ Probing...';
+        btn.disabled = true;
+        document.getElementById('inputProbeStatus').textContent = 'Probing devices...';
+        document.getElementById('outputProbeStatus').textContent = 'Probing devices...';
+
+        try {
+            const res = await fetch('/api/devices/probe');
+            const data = await res.json();
+
+            if (data.error) {
+                showToast('⚠️ Probe error: ' + data.error);
+                return;
+            }
+
+            // Populate inputs with probe results
+            populateProbeSelect('inputDevice', data.input || [], 'input');
+            populateProbeSelect('outputDevice', data.output || [], 'output');
+
+            // Auto-select recommended devices
+            const rec = data.recommended || {};
+            if (rec.input !== null && rec.input !== undefined) {
+                document.getElementById('inputDevice').value = rec.input;
+                const inputDev = (data.input || []).find(d => d.index === rec.input);
+                if (inputDev) {
+                    startSelectedDeviceMonitor(rec.input, inputDev.name);
+                }
+            }
+            if (rec.output !== null && rec.output !== undefined) {
+                document.getElementById('outputDevice').value = rec.output;
+            }
+
+            // Summary
+            const usableInputs = (data.input || []).filter(d => d.usable).length;
+            const signalInputs = (data.input || []).filter(d => d.has_signal).length;
+            const usableOutputs = (data.output || []).filter(d => d.usable).length;
+            document.getElementById('inputProbeStatus').textContent =
+                `${usableInputs} usable, ${signalInputs} with signal`;
+            document.getElementById('outputProbeStatus').textContent =
+                `${usableOutputs} usable`;
+
+            showToast(`🔬 Probe complete: ${signalInputs} input(s) with live signal`);
+        } catch (e) {
+            console.error('Device probe failed:', e);
+            showToast('❌ Device probe failed');
+            document.getElementById('inputProbeStatus').textContent = 'Probe failed';
+            document.getElementById('outputProbeStatus').textContent = 'Probe failed';
+        } finally {
+            probeInProgress = false;
+            btn.textContent = '🔬 Probe';
+            btn.disabled = false;
+        }
+    }
+
+    function populateProbeSelect(id, devices, role) {
+        const sel = document.getElementById(id);
+        const currentVal = sel.value;
+        sel.innerHTML = '<option value="">System Default</option>';
+
         devices.forEach(d => {
             const opt = document.createElement('option');
             opt.value = d.index;
-            opt.textContent = d.name;
+
+            // Build label with status indicators
+            let prefix = '';
+            if (d.remembered) prefix += '⭐ ';
+            if (d.has_signal) prefix += '🟢 ';
+            else if (d.usable) prefix += '⚪ ';
+            else prefix += '❌ ';
+
+            let suffix = '';
+            if (d.has_signal && d.level_db !== null) suffix = ` (${d.level_db} dB)`;
+            else if (d.error) suffix = ' (unavailable)';
+
+            opt.textContent = prefix + d.name + suffix;
+
+            // Gray out unusable devices
+            if (!d.usable) {
+                opt.style.color = '#666';
+                opt.disabled = true;
+            }
+
             sel.appendChild(opt);
         });
+
+        // Restore previous selection if still available
+        if (currentVal) sel.value = currentVal;
     }
 
     // ── Audio Level Monitor ─────────────────────────
@@ -1264,9 +1380,12 @@
     document.getElementById('targetLang').addEventListener('change', updateLangPairLabel);
 
     async function saveSettings() {
+        const inputVal = document.getElementById('inputDevice').value || null;
+        const outputVal = document.getElementById('outputDevice').value || null;
+
         const data = {
-            input_device: document.getElementById('inputDevice').value || null,
-            output_device: document.getElementById('outputDevice').value || null,
+            input_device: inputVal,
+            output_device: outputVal,
             source_language: document.getElementById('sourceLang').value,
             target_language: document.getElementById('targetLang').value,
             custom_vocabulary: document.getElementById('customVocab').value,
@@ -1281,8 +1400,25 @@
                 headers: {'Content-Type': 'application/json'},
                 body: JSON.stringify(data),
             });
+
+            // Remember device fingerprints for next time
+            if (inputVal) {
+                fetch('/api/devices/remember', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({role: 'input', device_index: parseInt(inputVal)}),
+                }).catch(() => {});
+            }
+            if (outputVal) {
+                fetch('/api/devices/remember', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({role: 'output', device_index: parseInt(outputVal)}),
+                }).catch(() => {});
+            }
+
             updateLangPairLabel();
-            showToast('✅ Settings saved!');
+            showToast('✅ Settings saved! Device preferences remembered.');
         } catch (e) {
             showToast('❌ Failed to save settings');
         }
