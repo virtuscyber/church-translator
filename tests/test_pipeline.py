@@ -22,7 +22,7 @@ async def test_translation_pipeline_wires_components_and_processes_audio(monkeyp
 
         async def get_chunk(self):
             recorder.calls.append(("get_chunk", None))
-            return b"wav-data"
+            return ("final", b"wav-data")
 
         async def start(self):
             recorder.calls.append(("capture_start", None))

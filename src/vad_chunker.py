@@ -86,6 +86,8 @@ class VADChunker:
         silence_threshold_sec: float = 0.8,
         padding_sec: float = 0.3,
         input_sample_rate: int = 48000,
+        enable_preview: bool = False,
+        preview_after_sec: float = 2.0,
     ):
         self.vad = EnergyVAD(aggressiveness)
         
@@ -94,6 +96,8 @@ class VADChunker:
         self.silence_threshold_sec = silence_threshold_sec
         self.padding_sec = padding_sec
         self.input_sample_rate = input_sample_rate
+        self.enable_preview = enable_preview
+        self.preview_after_sec = preview_after_sec
         
         # Frame size in input sample rate
         self._frame_samples = int(input_sample_rate * FRAME_MS / 1000)
@@ -110,11 +114,20 @@ class VADChunker:
         self._silence_gaps: deque = deque(maxlen=50)
         self._current_gap_start: Optional[float] = None
         
+        # Preview tracking — emit early snapshot for speculative STT
+        self._preview_emitted = False
+        
         # Leftover audio from last feed that didn't fill a frame
         self._leftover = np.array([], dtype=np.float32)
 
-    def feed(self, audio: np.ndarray) -> list[bytes]:
-        """Feed audio data and get back any completed chunks as WAV bytes."""
+    def feed(self, audio: np.ndarray) -> list[tuple[str, bytes]]:
+        """Feed audio data and get back any completed chunks.
+        
+        Returns:
+            List of (tag, wav_bytes) tuples where tag is:
+            - "preview": Early snapshot for speculative STT (more audio coming)
+            - "final": Complete chunk at speech boundary
+        """
         if audio.ndim > 1:
             audio = audio[:, 0]
         audio = audio.astype(np.float32)
@@ -128,7 +141,7 @@ class VADChunker:
         else:
             analysis_audio = audio
         
-        chunks_out: list[bytes] = []
+        chunks_out: list[tuple[str, bytes]] = []
         
         offset = 0
         while offset + self._frame_samples <= len(analysis_audio):
@@ -162,13 +175,23 @@ class VADChunker:
                         and self._buffered_seconds >= self.min_chunk_sec):
                     chunk = self._emit_chunk()
                     if chunk:
-                        chunks_out.append(chunk)
+                        chunks_out.append(("final", chunk))
                 
                 # Force-split at max duration — find best split point
                 elif self._buffered_seconds >= self.max_chunk_sec:
                     chunk = self._emit_chunk_smart()
                     if chunk:
-                        chunks_out.append(chunk)
+                        chunks_out.append(("final", chunk))
+                
+                # Preview emission — early snapshot for speculative STT
+                elif (self.enable_preview 
+                      and not self._preview_emitted
+                      and self._buffered_seconds >= self.preview_after_sec
+                      and self._speech_frames_total > 0):
+                    preview = self._snapshot_preview()
+                    if preview:
+                        chunks_out.append(("preview", preview))
+                        self._preview_emitted = True
         
         # Save leftover
         self._leftover = analysis_audio[offset:]
@@ -180,6 +203,20 @@ class VADChunker:
         if self._audio_buffer and self._buffered_seconds >= 0.5:
             return self._emit_chunk()
         return None
+
+    def _snapshot_preview(self) -> Optional[bytes]:
+        """Create a WAV snapshot of the current buffer WITHOUT resetting state.
+        
+        This allows speculative STT to begin while audio continues accumulating.
+        """
+        if not self._audio_buffer:
+            return None
+        
+        all_audio = np.concatenate(self._audio_buffer, axis=0)
+        duration = len(all_audio) / self.input_sample_rate
+        
+        logger.info("VAD preview: %.1fs snapshot for speculative STT", duration)
+        return self._to_wav(all_audio)
 
     def _emit_chunk_smart(self) -> Optional[bytes]:
         """Force-emit at max duration but split at the best silence gap.
@@ -232,6 +269,7 @@ class VADChunker:
         self._speech_frames_total = 0
         self._silence_gaps.clear()
         self._current_gap_start = None
+        self._preview_emitted = False
         self._leftover = np.array([], dtype=np.float32)
         
         return self._to_wav(chunk_audio)
@@ -273,6 +311,7 @@ class VADChunker:
         self._speech_frames_total = 0
         self._silence_gaps.clear()
         self._current_gap_start = None
+        self._preview_emitted = False
         self._leftover = np.array([], dtype=np.float32)
         
         return self._to_wav(chunk_audio)
@@ -343,13 +382,16 @@ class FileVADChunker:
         )
         
         # Feed in 100ms blocks to simulate streaming
+        # Preview is disabled for file chunking — only emit finals
         block_samples = int(sample_rate * 0.1)
         all_chunks: list[bytes] = []
         
         for start in range(0, len(audio), block_samples):
             block = audio[start:start + block_samples]
-            chunks = chunker.feed(block)
-            all_chunks.extend(chunks)
+            tagged_chunks = chunker.feed(block)
+            for tag, wav_bytes in tagged_chunks:
+                if tag == "final":
+                    all_chunks.append(wav_bytes)
         
         # Flush remaining
         final = chunker.flush()
