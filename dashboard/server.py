@@ -942,104 +942,146 @@ async def _run_live_pipeline():
         total_latency = 0.0
         chunk_count = 0
 
-        # Playback queue — TTS audio is played in order but doesn't block the pipeline
-        playback_queue = asyncio.Queue()
+        # ── Ordered concurrent playback system ──────────────────────
+        # Each chunk gets a "slot" (asyncio.Queue). Chunks process
+        # concurrently (STT + translate + TTS), but audio plays back
+        # in strict sequence order to prevent garbled output.
+        #
+        # Chunk 1: [STT][translate][TTS→slot1: 🔊🔊🔊]
+        # Chunk 2:   [STT][translate][TTS→slot2: buffer]  →  [🔊🔊🔊]
+        #                   ↑ concurrent!                     ↑ plays after slot1
+        playback_slots: dict[int, asyncio.Queue] = {}
         playback_active = True
+        next_slot_ready = asyncio.Event()
 
         async def _playback_worker():
-            """Plays TTS audio in order without blocking the main processing loop."""
-            while playback_active or not playback_queue.empty():
-                try:
-                    audio_bytes = await asyncio.wait_for(playback_queue.get(), timeout=0.5)
-                    if audio_bytes is None:
+            """Drains playback slots in order: slot 1, then 2, then 3..."""
+            next_seq = 1
+            while playback_active or playback_slots:
+                # Wait for the next sequence's slot to appear
+                if next_seq not in playback_slots:
+                    next_slot_ready.clear()
+                    try:
+                        await asyncio.wait_for(next_slot_ready.wait(), timeout=0.5)
+                    except asyncio.TimeoutError:
+                        continue
+                    if next_seq not in playback_slots:
+                        continue
+
+                slot = playback_slots[next_seq]
+                logger.info("Playback: starting slot %d", next_seq)
+
+                # Drain all audio chunks from this slot
+                while True:
+                    try:
+                        audio_bytes = await asyncio.wait_for(slot.get(), timeout=2.0)
+                    except asyncio.TimeoutError:
+                        if not playback_active:
+                            break
+                        continue
+                    if audio_bytes is None:  # End-of-slot marker
                         break
                     play_tasks = [playback.play(audio_bytes)]
                     if aes67:
                         play_tasks.append(aes67.play(audio_bytes))
-                    await asyncio.gather(*play_tasks)
-                except asyncio.TimeoutError:
-                    continue
-                except Exception as e:
-                    logger.warning("Playback error: %s", e)
+                    try:
+                        await asyncio.gather(*play_tasks)
+                    except Exception as e:
+                        logger.warning("Playback error (slot %d): %s", next_seq, e)
+
+                # Slot done — advance to next
+                del playback_slots[next_seq]
+                logger.info("Playback: slot %d complete, advancing", next_seq)
+                next_seq += 1
 
         playback_task = asyncio.create_task(_playback_worker())
 
         async def _process_chunk(wav_bytes, seq, pre_transcribed=None):
-            """Process a single chunk: STT → Translate → TTS (queued).
+            """Process a single chunk: STT → Translate → TTS → slot.
             
-            If pre_transcribed is provided (from speculative STT), skips the
-            STT step entirely — saving 1-2 seconds of processing time.
+            Runs concurrently with other chunks. STT and translation happen
+            in parallel across chunks, but TTS audio is routed to a per-chunk
+            slot that the playback worker drains in order.
             """
             nonlocal total_latency
             t0 = time.time()
 
-            # STT — use speculative result if available
-            if pre_transcribed:
-                src_text = pre_transcribed
-                logger.info("Skipped STT (using speculative result): %.2fs saved", 0)
-            else:
-                src_text = await transcriber.transcribe(wav_bytes)
-            if not src_text:
-                return
+            # Reserve our playback slot FIRST so ordering is guaranteed
+            slot = asyncio.Queue()
+            playback_slots[seq] = slot
+            next_slot_ready.set()  # Wake playback worker if waiting
 
-            await broadcast({
-                "type": "stt",
-                "seq": seq,
-                "total": 0,
-                "text": src_text,
-            })
+            try:
+                # STT — use speculative result if available
+                if pre_transcribed:
+                    src_text = pre_transcribed
+                    logger.info("[Chunk %d] Using speculative STT result", seq)
+                else:
+                    src_text = await transcriber.transcribe(wav_bytes)
+                if not src_text:
+                    return
 
-            # Translate
-            tgt_text = await translator.translate(src_text)
-            if not tgt_text:
-                return
+                await broadcast({
+                    "type": "stt",
+                    "seq": seq,
+                    "total": 0,
+                    "text": src_text,
+                })
 
-            latency = time.time() - t0
-            total_latency += latency
-            state.stats["chunks_processed"] = seq
-            state.stats["avg_latency"] = total_latency / seq
+                # Translate
+                tgt_text = await translator.translate(src_text)
+                if not tgt_text:
+                    return
 
-            entry = {
-                "seq": seq,
-                "source": src_text,
-                "translated": tgt_text,
-                "source_lang": src_lang,
-                "target_lang": tgt_lang,
-                "latency": round(latency, 1),
-                "timestamp": time.time(),
-                "ukrainian": src_text,
-                "english": tgt_text,
-            }
-            state.transcript.append(entry)
+                latency = time.time() - t0
+                total_latency += latency
+                state.stats["chunks_processed"] = seq
+                state.stats["avg_latency"] = total_latency / seq
 
-            await broadcast({
-                "type": "translation",
-                "entry": entry,
-                "progress": 0,
-                "stats": {
-                    "chunks_processed": seq,
-                    "total_chunks": 0,
-                    "avg_latency": round(state.stats["avg_latency"], 1),
-                },
-            })
+                entry = {
+                    "seq": seq,
+                    "source": src_text,
+                    "translated": tgt_text,
+                    "source_lang": src_lang,
+                    "target_lang": tgt_lang,
+                    "latency": round(latency, 1),
+                    "timestamp": time.time(),
+                    "ukrainian": src_text,
+                    "english": tgt_text,
+                }
+                state.transcript.append(entry)
 
-            # TTS — stream chunks to playback as they arrive (low latency)
-            # Instead of waiting for full synthesis, we play each chunk
-            # as it arrives from the API. First audio plays ~200-500ms
-            # after TTS request, vs 2-3s for full synthesis.
-            tts_started = False
-            async for audio_chunk in synthesizer.synthesize_stream(tgt_text):
-                if not tts_started:
-                    tts_time_to_first = time.time() - t0 - latency
-                    logger.info("TTS first audio chunk in %.2fs", tts_time_to_first)
-                    tts_started = True
-                await playback_queue.put(audio_chunk)
+                await broadcast({
+                    "type": "translation",
+                    "entry": entry,
+                    "progress": 0,
+                    "stats": {
+                        "chunks_processed": seq,
+                        "total_chunks": 0,
+                        "avg_latency": round(state.stats["avg_latency"], 1),
+                    },
+                })
+
+                # TTS — stream chunks into our slot
+                # Playback worker will drain this slot when it's our turn
+                tts_started = False
+                async for audio_chunk in synthesizer.synthesize_stream(tgt_text):
+                    if not tts_started:
+                        tts_time_to_first = time.time() - t0 - latency
+                        logger.info("[Chunk %d] TTS first audio in %.2fs", seq, tts_time_to_first)
+                        tts_started = True
+                    await slot.put(audio_chunk)
+
+            finally:
+                # Always send end marker so playback worker advances
+                await slot.put(None)
 
         # Main loop with speculative STT:
         # 1. When VAD emits a "preview", start STT speculatively
         # 2. When "final" arrives, use speculative result if ready, or transcribe full chunk
         # This overlaps STT processing with VAD capture, saving 1-2s
-        MAX_CONCURRENT = 2
+        MAX_CONCURRENT = 3  # Process up to 3 chunks simultaneously
+        # (STT + translate run concurrently; playback is serialized in order)
         speculative_stt_task: Optional[asyncio.Task] = None
         speculative_stt_result: Optional[str] = None
 
@@ -1122,10 +1164,9 @@ async def _run_live_pipeline():
                     task.cancel()
             await asyncio.gather(*processing_tasks, return_exceptions=True)
 
-        if playback_queue is not None:
-            playback_active = False
-            with contextlib.suppress(asyncio.QueueFull):
-                await playback_queue.put(None)
+        # Signal playback worker to stop
+        playback_active = False
+        next_slot_ready.set()  # Wake it up if waiting
         if playback_task:
             with contextlib.suppress(asyncio.CancelledError, Exception):
                 await playback_task
