@@ -918,9 +918,13 @@
     // ── State ─────────────────────────────────────
     let ws = null;
     let reconnectTimer = null;
+    let statusResetTimer = null;
     let wizardStep = 1;
     let languages = [];
     let pageUnloading = false;
+
+    const AUTH_TOKEN_STORAGE_KEY = 'dashboard_api_token';
+    const originalFetch = window.fetch.bind(window);
 
     const LANG_LIST = [
         {code:"uk",name:"Ukrainian"},{code:"ru",name:"Russian"},{code:"es",name:"Spanish"},
@@ -929,6 +933,50 @@
         {code:"pl",name:"Polish"},{code:"ro",name:"Romanian"},{code:"it",name:"Italian"},
         {code:"ja",name:"Japanese"},{code:"hi",name:"Hindi"},{code:"en",name:"English"},
     ];
+
+    const initialAuthToken = new URLSearchParams(window.location.search).get('token');
+    if (initialAuthToken) {
+        localStorage.setItem(AUTH_TOKEN_STORAGE_KEY, initialAuthToken);
+    }
+
+    function getStoredAuthToken() {
+        return localStorage.getItem(AUTH_TOKEN_STORAGE_KEY)
+            || localStorage.getItem('dashboardAuthToken')
+            || '';
+    }
+
+    function getAuthHeaders(headers = {}) {
+        const merged = {...headers};
+        const token = getStoredAuthToken();
+        if (token) {
+            merged.Authorization = `Bearer ${token}`;
+        }
+        return merged;
+    }
+
+    function apiFetch(url, options = {}) {
+        return originalFetch(url, {
+            ...options,
+            headers: getAuthHeaders(options.headers || {}),
+        });
+    }
+
+    function clearStatusResetTimer() {
+        if (statusResetTimer) {
+            clearTimeout(statusResetTimer);
+            statusResetTimer = null;
+        }
+    }
+
+    function renderAudioScanMessage(message, color) {
+        const bars = document.getElementById('audioLevelBars');
+        bars.replaceChildren();
+        const div = document.createElement('div');
+        div.style.color = color;
+        div.style.fontSize = '0.8em';
+        div.textContent = message;
+        bars.appendChild(div);
+    }
 
     // ── Init ──────────────────────────────────────
     connectWS();
@@ -966,7 +1014,7 @@
 
     async function loadDevices() {
         try {
-            const res = await fetch('/api/devices');
+            const res = await apiFetch('/api/devices');
             const data = await res.json();
             populateDeviceSelect('inputDevice', data.input || [], 'input');
             populateDeviceSelect('outputDevice', data.output || [], 'output');
@@ -1018,7 +1066,7 @@
         document.getElementById('outputProbeStatus').textContent = 'Probing devices...';
 
         try {
-            const res = await fetch('/api/devices/probe');
+            const res = await apiFetch('/api/devices/probe');
             const data = await res.json();
 
             if (data.error) {
@@ -1140,35 +1188,54 @@
 
     async function scanAudioLevels() {
         try {
-            const res = await fetch('/api/audio-levels');
+            const res = await apiFetch('/api/audio-levels');
             if (!res.ok) throw new Error('Audio scan request failed');
             const data = await res.json();
             const bars = document.getElementById('audioLevelBars');
             if (!data.devices || data.devices.length === 0) {
-                bars.innerHTML = '<div style="color:var(--text-dim);font-size:0.8em;">No input devices found.</div>';
+                renderAudioScanMessage('No input devices found.', 'var(--text-dim)');
                 return;
             }
             const sorted = [...data.devices].sort((a, b) => (b.level_pct || 0) - (a.level_pct || 0));
-            bars.innerHTML = sorted.map(d => {
+            bars.replaceChildren();
+            sorted.forEach(d => {
                 const pct = d.level_pct || 0;
                 const hasAudio = d.has_audio;
                 const fillClass = d.error ? 'silent' : pct > 80 ? 'hot' : pct > 30 ? 'medium' : pct > 5 ? 'low' : 'silent';
-                const badge = hasAudio
-                    ? '<span class="level-badge active">LIVE</span>'
-                    : '<span class="level-badge silent">silent</span>';
                 const dbText = d.error ? 'err' : d.level_db !== null ? `${d.level_db} dB` : '—';
-                const safeName = escapeHtml(d.name);
-                const jsName = JSON.stringify(d.name);
-                return `<div class="level-row ${hasAudio ? 'has-audio' : ''}" onclick='selectInputDevice(${d.index}, ${jsName})'>
-                    <div class="level-name" title="${safeName}">${safeName}</div>
-                    <div class="level-bar-bg"><div class="level-bar-fill ${fillClass}" style="width:${pct}%"></div></div>
-                    <div class="level-db">${dbText}</div>
-                    ${badge}
-                </div>`;
-            }).join('');
+                const row = document.createElement('div');
+                row.className = 'level-row' + (hasAudio ? ' has-audio' : '');
+                row.addEventListener('click', () => selectInputDevice(d.index, d.name));
+
+                const name = document.createElement('div');
+                name.className = 'level-name';
+                name.title = d.name;
+                name.textContent = d.name;
+
+                const barBg = document.createElement('div');
+                barBg.className = 'level-bar-bg';
+                const barFill = document.createElement('div');
+                barFill.className = `level-bar-fill ${fillClass}`;
+                barFill.style.width = `${pct}%`;
+                barBg.appendChild(barFill);
+
+                const db = document.createElement('div');
+                db.className = 'level-db';
+                db.textContent = dbText;
+
+                const badge = document.createElement('span');
+                badge.className = hasAudio ? 'level-badge active' : 'level-badge silent';
+                badge.textContent = hasAudio ? 'LIVE' : 'silent';
+
+                row.appendChild(name);
+                row.appendChild(barBg);
+                row.appendChild(db);
+                row.appendChild(badge);
+                bars.appendChild(row);
+            });
         } catch (e) {
             console.error('Audio scan failed:', e);
-            document.getElementById('audioLevelBars').innerHTML = '<div style="color:var(--red);font-size:0.8em;">Audio scan failed.</div>';
+            renderAudioScanMessage('Audio scan failed.', 'var(--red)');
         }
     }
 
@@ -1187,7 +1254,7 @@
         async function poll() {
             if (token !== selectedMonitorToken) return;
             try {
-                const res = await fetch('/api/audio-level', {
+                const res = await apiFetch('/api/audio-level', {
                     method: 'POST',
                     headers: {'Content-Type': 'application/json'},
                     body: JSON.stringify({device_index: index}),
@@ -1268,7 +1335,7 @@
     async function loadVoices() {
         const sel = document.getElementById('voiceSelect');
         try {
-            const res = await fetch('/api/voices');
+            const res = await apiFetch('/api/voices');
             const data = await res.json();
             voicesData = data.voices || [];
             if (voicesData.length === 0) {
@@ -1327,7 +1394,7 @@
 
     async function loadConfig() {
         try {
-            const res = await fetch('/api/config');
+            const res = await apiFetch('/api/config');
             const cfg = await res.json();
             if (cfg.input_device !== undefined && cfg.input_device !== null) {
                 document.getElementById('inputDevice').value = cfg.input_device;
@@ -1395,7 +1462,7 @@
             tts_model: document.getElementById('ttsModel').value,
         };
         try {
-            await fetch('/api/config', {
+            await apiFetch('/api/config', {
                 method: 'POST',
                 headers: {'Content-Type': 'application/json'},
                 body: JSON.stringify(data),
@@ -1403,14 +1470,14 @@
 
             // Remember device fingerprints for next time
             if (inputVal) {
-                fetch('/api/devices/remember', {
+                apiFetch('/api/devices/remember', {
                     method: 'POST',
                     headers: {'Content-Type': 'application/json'},
                     body: JSON.stringify({role: 'input', device_index: parseInt(inputVal)}),
                 }).catch(() => {});
             }
             if (outputVal) {
-                fetch('/api/devices/remember', {
+                apiFetch('/api/devices/remember', {
                     method: 'POST',
                     headers: {'Content-Type': 'application/json'},
                     body: JSON.stringify({role: 'output', device_index: parseInt(outputVal)}),
@@ -1427,7 +1494,7 @@
     async function testOutput() {
         const deviceIndex = document.getElementById('outputDevice').value;
         try {
-            const res = await fetch('/api/test-output', {
+            const res = await apiFetch('/api/test-output', {
                 method: 'POST',
                 headers: {'Content-Type': 'application/json'},
                 body: JSON.stringify({device_index: deviceIndex || null}),
@@ -1446,7 +1513,7 @@
     // ── Setup Wizard ──────────────────────────────
     async function checkSetupStatus() {
         try {
-            const res = await fetch('/api/setup/status');
+            const res = await apiFetch('/api/setup/status');
             const data = await res.json();
             if (!data.configured) {
                 openWizard(true);
@@ -1505,7 +1572,7 @@
         if (!key) { el.textContent = 'Please enter a key'; el.className = 'test-result error'; return; }
         el.textContent = 'Testing...'; el.className = 'test-result loading';
         try {
-            const res = await fetch('/api/setup/test-openai', {
+            const res = await apiFetch('/api/setup/test-openai', {
                 method: 'POST',
                 headers: {'Content-Type': 'application/json'},
                 body: JSON.stringify({api_key: key}),
@@ -1527,7 +1594,7 @@
         if (!key) { el.textContent = 'Please enter a key'; el.className = 'test-result error'; return; }
         el.textContent = 'Testing...'; el.className = 'test-result loading';
         try {
-            const res = await fetch('/api/setup/test-elevenlabs', {
+            const res = await apiFetch('/api/setup/test-elevenlabs', {
                 method: 'POST',
                 headers: {'Content-Type': 'application/json'},
                 body: JSON.stringify({api_key: key}),
@@ -1556,7 +1623,7 @@
             return;
         }
         try {
-            const res = await fetch('/api/setup/save', {
+            const res = await apiFetch('/api/setup/save', {
                 method: 'POST',
                 headers: {'Content-Type': 'application/json'},
                 body: JSON.stringify(data),
@@ -1580,7 +1647,12 @@
     // ── WebSocket ─────────────────────────────────
     function connectWS() {
         const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
-        ws = new WebSocket(`${protocol}//${location.host}/ws`);
+        const token = getStoredAuthToken();
+        const url = new URL(`${protocol}//${location.host}/ws`);
+        if (token) {
+            url.searchParams.set('token', token);
+        }
+        ws = new WebSocket(url.toString());
 
         ws.onopen = () => {
             document.getElementById('connectionDot').classList.add('connected');
@@ -1645,6 +1717,8 @@
         const statStatus = document.getElementById('statStatus');
         const progress = document.getElementById('progressContainer');
 
+        clearStatusResetTimer();
+
         badge.className = 'status-badge ' + status;
 
         switch (status) {
@@ -1664,7 +1738,12 @@
                 text.textContent = 'Done'; live.classList.remove('active');
                 startBtn.style.display = 'flex'; stopBtn.style.display = 'none';
                 statStatus.textContent = '✅ Complete'; statStatus.style.color = 'var(--green)';
-                setTimeout(() => { progress.classList.remove('active'); badge.className = 'status-badge stopped'; text.textContent = 'Ready'; }, 3000);
+                statusResetTimer = setTimeout(() => {
+                    progress.classList.remove('active');
+                    badge.className = 'status-badge stopped';
+                    text.textContent = 'Ready';
+                    statusResetTimer = null;
+                }, 3000);
                 break;
             case 'error':
                 text.textContent = 'Error'; live.classList.remove('active');
@@ -1750,6 +1829,7 @@
     async function startTest() {
         const filePath = document.getElementById('fileInput').value.trim();
         if (!filePath) { showToast('⚠️ Please enter a file path'); return; }
+        clearStatusResetTimer();
 
         const body = document.getElementById('transcriptBody');
         body.innerHTML = '';
@@ -1762,7 +1842,7 @@
         await saveSettings();
 
         try {
-            const res = await fetch('/api/test-file', {
+            const res = await apiFetch('/api/test-file', {
                 method: 'POST',
                 headers: {'Content-Type': 'application/json'},
                 body: JSON.stringify({file_path: filePath}),
@@ -1775,13 +1855,13 @@
     }
 
     async function stopTest() {
-        try { await fetch('/api/stop', {method: 'POST'}); } catch (err) { showToast('❌ Failed to stop: ' + err.message); }
+        try { await apiFetch('/api/stop', {method: 'POST'}); } catch (err) { showToast('❌ Failed to stop: ' + err.message); }
     }
 
     // ── Health Checks ────────────────────────────
     async function loadHealthChecks() {
         try {
-            const res = await fetch('/api/health');
+            const res = await apiFetch('/api/health');
             const data = await res.json();
             const checks = data.checks;
             renderHealthItem('healthPython', checks.python);
@@ -1809,6 +1889,7 @@
     async function startLive() {
         // Save settings first
         await saveSettings();
+        clearStatusResetTimer();
 
         const body = document.getElementById('transcriptBody');
         body.innerHTML = '';
@@ -1816,7 +1897,7 @@
         document.getElementById('statChunks').textContent = '0';
 
         try {
-            const res = await fetch('/api/start-live', {
+            const res = await apiFetch('/api/start-live', {
                 method: 'POST',
                 headers: {'Content-Type': 'application/json'},
             });
@@ -1833,7 +1914,7 @@
 
     async function stopLive() {
         try {
-            await fetch('/api/stop-live', { method: 'POST' });
+            await apiFetch('/api/stop-live', { method: 'POST' });
             liveMode = false;
         } catch (err) {
             showToast('\u274C Failed to stop: ' + err.message);

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import io
 import json
 import logging
 import math
@@ -16,6 +17,7 @@ import os
 import struct
 import sys
 import time
+import wave
 from pathlib import Path
 from typing import Optional
 
@@ -73,18 +75,50 @@ DASHBOARD_API_KEY = os.getenv("DASHBOARD_API_KEY", "")
 CORS_ORIGIN = os.getenv("DASHBOARD_CORS_ORIGIN", "")
 
 # Paths that don't require auth
-_PUBLIC_PATHS = {"/", "/ws"}
+_PUBLIC_PATHS = {"/"}
+
+
+def _has_configured_openai_key() -> bool:
+    """Return whether first-run setup has already been completed."""
+    from dotenv import load_dotenv
+
+    load_dotenv(PROJECT_ROOT / ".env", override=True)
+    openai_key = os.getenv("OPENAI_API_KEY", "").strip()
+    return bool(openai_key and not openai_key.startswith("sk-your"))
+
+
+def _is_request_authorized(request: web.Request) -> bool:
+    """Check dashboard auth via header or WebSocket query token."""
+    auth = request.headers.get("Authorization", "")
+    if auth == f"Bearer {DASHBOARD_API_KEY}":
+        return True
+
+    if request.path == "/ws":
+        query = getattr(request, "query", {})
+        return query.get("token", "") == DASHBOARD_API_KEY
+
+    return False
+
+
+def _wav_duration_seconds(wav_bytes: bytes) -> float:
+    """Return WAV duration in seconds, or 0 when unreadable."""
+    try:
+        with wave.open(io.BytesIO(wav_bytes), "rb") as wf:
+            frame_rate = wf.getframerate() or 1
+            return wf.getnframes() / frame_rate
+    except Exception:
+        return 0.0
 
 
 @web.middleware
 async def auth_middleware(request: web.Request, handler):
     """Require Bearer token for API routes when DASHBOARD_API_KEY is set."""
     if DASHBOARD_API_KEY and request.path not in _PUBLIC_PATHS:
-        # Allow setup endpoints without auth (needed for first-run wizard)
-        if not request.path.startswith("/api/setup"):
-            auth = request.headers.get("Authorization", "")
-            if auth != f"Bearer {DASHBOARD_API_KEY}":
-                return web.json_response({"error": "Unauthorized"}, status=401)
+        allow_setup_without_auth = (
+            request.path.startswith("/api/setup") and not _has_configured_openai_key()
+        )
+        if not allow_setup_without_auth and not _is_request_authorized(request):
+            return web.json_response({"error": "Unauthorized"}, status=401)
     response = await handler(request)
     origin = CORS_ORIGIN or "http://localhost:8085"
     response.headers["Access-Control-Allow-Origin"] = origin
@@ -265,6 +299,9 @@ async def api_stop(request):
 
 async def api_test_file(request):
     """Run a test translation on an uploaded or specified file."""
+    if state.running or state.live_running:
+        return web.json_response({"error": "Already running"}, status=400)
+
     data = await request.json()
     file_path = data.get("file_path", "")
 
@@ -1172,6 +1209,7 @@ async def _run_live_pipeline():
         async def _playback_worker():
             """Drains playback slots in order: slot 1, then 2, then 3..."""
             next_seq = 1
+            slot_timeout_sec = 30.0
             while playback_active or playback_slots:
                 # Wait for the next sequence's slot to appear
                 if next_seq not in playback_slots:
@@ -1185,13 +1223,22 @@ async def _run_live_pipeline():
 
                 slot = playback_slots[next_seq]
                 logger.info("Playback: starting slot %d", next_seq)
+                slot_started_at = time.monotonic()
 
                 # Drain all audio chunks from this slot
                 while True:
+                    elapsed = time.monotonic() - slot_started_at
+                    remaining = slot_timeout_sec - elapsed
+                    if remaining <= 0:
+                        logger.warning("Playback slot %d timed out after %.1fs; skipping", next_seq, slot_timeout_sec)
+                        await slot.put(None)
+                        break
                     try:
-                        audio_bytes = await asyncio.wait_for(slot.get(), timeout=2.0)
+                        audio_bytes = await asyncio.wait_for(slot.get(), timeout=min(2.0, remaining))
                     except asyncio.TimeoutError:
                         if not playback_active:
+                            logger.warning("Playback slot %d incomplete during shutdown; skipping", next_seq)
+                            await slot.put(None)
                             break
                         continue
                     if audio_bytes is None:  # End-of-slot marker
@@ -1228,11 +1275,11 @@ async def _run_live_pipeline():
 
             try:
                 # STT — use speculative result if available
-                if pre_transcribed:
+                if pre_transcribed is not None:
                     src_text = pre_transcribed
                     logger.info("[Chunk %d] Using speculative STT result", seq)
                 else:
-                    src_text = await transcriber.transcribe(wav_bytes)
+                    src_text = await asyncio.wait_for(transcriber.transcribe(wav_bytes), timeout=20.0)
                 if not src_text:
                     return
 
@@ -1244,7 +1291,7 @@ async def _run_live_pipeline():
                 })
 
                 # Translate
-                tgt_text = await translator.translate(src_text)
+                tgt_text = await asyncio.wait_for(translator.translate(src_text), timeout=20.0)
                 if not tgt_text:
                     return
 
@@ -1287,6 +1334,10 @@ async def _run_live_pipeline():
                         tts_started = True
                     await slot.put(audio_chunk)
 
+            except asyncio.TimeoutError as exc:
+                logger.warning("[Chunk %d] Processing timed out: %s", seq, exc)
+                return
+
             finally:
                 # Always send end marker so playback worker advances
                 await slot.put(None)
@@ -1299,6 +1350,7 @@ async def _run_live_pipeline():
         # (STT + translate run concurrently; playback is serialized in order)
         speculative_stt_task: Optional[asyncio.Task] = None
         speculative_stt_result: Optional[str] = None
+        speculative_stt_duration: Optional[float] = None
 
         async def _speculative_transcribe(wav_bytes: bytes):
             """Run STT on preview audio in background."""
@@ -1328,6 +1380,7 @@ async def _run_live_pipeline():
                 # Start speculative STT in background — don't block capture
                 if speculative_stt_task is None or speculative_stt_task.done():
                     speculative_stt_result = None
+                    speculative_stt_duration = _wav_duration_seconds(wav_bytes)
                     speculative_stt_task = asyncio.create_task(
                         _speculative_transcribe(wav_bytes)
                     )
@@ -1339,8 +1392,14 @@ async def _run_live_pipeline():
 
             # Check if speculative STT already has our answer
             pre_transcribed = None
+            final_duration = _wav_duration_seconds(wav_bytes)
             if speculative_stt_task is not None:
-                if speculative_stt_task.done() and speculative_stt_result:
+                if (
+                    speculative_stt_task.done()
+                    and speculative_stt_result
+                    and speculative_stt_duration
+                    and abs(final_duration - speculative_stt_duration) <= (speculative_stt_duration * 0.1)
+                ):
                     pre_transcribed = speculative_stt_result
                     logger.info("Using speculative STT result (saved STT wait time!)")
                 else:
@@ -1348,8 +1407,15 @@ async def _run_live_pipeline():
                     if not speculative_stt_task.done():
                         speculative_stt_task.cancel()
                         logger.info("Speculative STT not ready, transcribing full chunk")
+                    elif speculative_stt_result:
+                        logger.info(
+                            "Discarding speculative STT result (preview %.2fs, final %.2fs)",
+                            speculative_stt_duration or 0.0,
+                            final_duration,
+                        )
                 speculative_stt_task = None
                 speculative_stt_result = None
+                speculative_stt_duration = None
 
             task = asyncio.create_task(
                 _process_chunk(wav_bytes, chunk_count, pre_transcribed=pre_transcribed)
