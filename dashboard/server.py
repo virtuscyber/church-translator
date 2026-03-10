@@ -1013,10 +1013,17 @@ async def _run_live_pipeline():
                 },
             })
 
-            # TTS — synthesize and queue for playback (non-blocking)
-            audio_bytes = await synthesizer.synthesize(tgt_text)
-            if audio_bytes:
-                await playback_queue.put(audio_bytes)
+            # TTS — stream chunks to playback as they arrive (low latency)
+            # Instead of waiting for full synthesis, we play each chunk
+            # as it arrives from the API. First audio plays ~200-500ms
+            # after TTS request, vs 2-3s for full synthesis.
+            tts_started = False
+            async for audio_chunk in synthesizer.synthesize_stream(tgt_text):
+                if not tts_started:
+                    tts_time_to_first = time.time() - t0 - latency
+                    logger.info("TTS first audio chunk in %.2fs", tts_time_to_first)
+                    tts_started = True
+                await playback_queue.put(audio_chunk)
 
         # Main loop: capture overlaps with processing
         # We process chunks concurrently (up to 2 at a time) so capture never stalls
