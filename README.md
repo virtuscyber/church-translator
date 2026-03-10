@@ -1,30 +1,63 @@
 # Church Live Translation
 
-Real-time Ukrainian → English translation for church services with biblical language styling. Audio flows from microphone through AI translation and out to speakers or Dante network.
+Real-time multilingual translation for church services with biblical language styling. Audio flows from microphone through AI-powered speech recognition, translation, and synthesis — out to speakers, Dante network, or AES67 multicast.
 
 ## How It Works
 
 ```
-Microphone (Ukrainian audio) → Whisper STT → GPT-4o Translation → ElevenLabs TTS → Speakers / Dante
+Microphone → VAD Chunking → Whisper STT → GPT-4o Translation → Streaming TTS → Speakers / Dante / AES67
 ```
 
-1. **Captures** the preacher's Ukrainian audio from a microphone or Dante virtual soundcard
-2. **Transcribes** using OpenAI's `gpt-4o-transcribe` (best Ukrainian accuracy)
-3. **Translates** Ukrainian → English with biblical vocabulary (GPT-4o + custom prompt)
-4. **Speaks** the English translation via ElevenLabs (warm, natural voice)
-5. **Outputs** to local speakers and/or Dante network for listeners' headphones
+1. **Captures** the speaker's audio from a microphone, Dante Via, or VBCable
+2. **Detects speech** using VAD (Voice Activity Detection) with smart sentence-boundary splitting
+3. **Transcribes** using OpenAI's `gpt-4o-transcribe` with speculative early transcription
+4. **Translates** to one or more target languages (GPT-4o + custom biblical prompt)
+5. **Speaks** the translation via streaming ElevenLabs or OpenAI TTS
+6. **Outputs** to local speakers, Dante Via, and/or AES67 multicast — simultaneously
 
-**Expected latency: 10-15 seconds** | **Cost: ~$2-3/hour**
+### Supported Languages
+
+Ukrainian, Russian, English, Spanish, Portuguese, French, German, Korean, Mandarin Chinese, Arabic, Polish, Romanian, Italian, Japanese, Hindi — with multi-language simultaneous output.
 
 ---
 
-## Quick Start (Recommended)
+## Performance
 
-No Docker, no terminal commands. Any tech volunteer can do this.
+| Metric | Value |
+|--------|-------|
+| **Typical end-to-end latency** | **5–8 seconds** |
+| **Worst case latency** | ~12 seconds |
+| **Estimated cost** | ~$2–3/hour |
+
+### Optimization Pipeline
+
+The system uses four layered optimizations to minimize latency:
+
+| Optimization | How It Works | Savings |
+|---|---|---|
+| **VAD smart chunking** | Splits audio on natural speech pauses instead of fixed intervals. Smart force-splitting at max duration finds the best silence gap instead of cutting mid-word. | Faster, higher quality chunks |
+| **Speculative STT** | Starts transcribing a preview snapshot while the speaker is still talking. If STT finishes before the VAD chunk completes, the transcription step is skipped entirely. | ~1–2s per chunk |
+| **Streaming TTS** | Plays audio chunks as they arrive from the TTS API (~300ms for first audio) instead of waiting for full synthesis. | ~2–3s per chunk |
+| **Concurrent processing** | Up to 3 chunks process STT + translate + TTS simultaneously, with an ordered playback system that ensures audio plays in the correct sequence. | Eliminates gaps between translations |
+
+```
+Pipeline visualization (concurrent mode):
+
+Chunk 1: [STT][translate][TTS→slot1→🔊🔊🔊]
+Chunk 2:   [STT][translate][TTS→slot2→buffer] → [🔊🔊🔊]
+Chunk 3:       [STT][translate][TTS→slot3]        → [🔊🔊]
+                 ↑ all running simultaneously
+```
+
+---
+
+## Quick Start
+
+No Docker, no terminal commands. Any tech volunteer can run this.
 
 ### 1. Download
 
-```
+```bash
 git clone https://github.com/virtuscyber/church-translator.git
 ```
 
@@ -43,7 +76,7 @@ The launcher automatically:
 
 ### 3. Setup Wizard
 
-The browser opens to the dashboard. On first run, a setup wizard walks you through:
+The browser opens to the dashboard at **http://localhost:8085**. On first run, a setup wizard walks you through:
 - Entering your **OpenAI API key** (required)
 - Entering your **ElevenLabs API key** (optional — falls back to OpenAI TTS)
 - Choosing source and target languages
@@ -55,8 +88,6 @@ Click **Start Live Translation**, and the system begins listening, translating, 
 ---
 
 ## Alternative: Docker
-
-If you prefer Docker:
 
 ```bash
 git clone https://github.com/virtuscyber/church-translator.git
@@ -82,7 +113,7 @@ For a native install on a fresh machine:
 curl -sL https://raw.githubusercontent.com/virtuscyber/church-translator/main/install.sh | bash
 ```
 
-The script detects your OS (macOS, Ubuntu/Debian, Fedora, Arch), installs prerequisites, and sets everything up.
+Detects your OS (macOS, Ubuntu/Debian, Fedora, Arch), installs prerequisites, and sets everything up.
 
 ---
 
@@ -100,56 +131,164 @@ The dashboard shows a health check panel on load — it tells you exactly what's
 
 ---
 
-## Dante / AES67 Configuration
+## Audio Output Options
 
-For network audio output to Dante:
+### Local Speakers (Default)
 
-1. Open **Dante Controller** on the network
-2. Route the preacher's microphone channel to Dante Via on the translation PC
-3. In **Dante Via**, route that channel to the app's input
-4. Route the app's output back through Dante Via to the translation output channel
-5. Connect translation output to listener headphones/speakers in Dante Controller
+Set `output.mode: "sounddevice"` in `config.yaml`. Audio plays through the system's default output device or a specified device.
 
-Set `output.mode` to `"dante"` or `"both"` in `config.yaml` to enable AES67 multicast output.
+### Dante Via (Recommended for Dante Networks)
+
+The simplest way to get translation audio onto a Dante network:
+
+1. Install **Dante Via** on the translation laptop
+2. Create a **Transmit** route in Dante Via
+3. Set the output device in `config.yaml` to the Dante Via virtual output:
+   ```yaml
+   output:
+     mode: "sounddevice"
+     output_device: "Dante Via Transmit"
+   ```
+4. In **Dante Controller**, route the Dante Via device to your receivers (Williams Sound headsets, speakers, etc.)
+
+### AES67 Multicast (Direct, No Dante Via)
+
+For direct AES67 output without Dante Via:
+
+1. Set output mode in `config.yaml`:
+   ```yaml
+   output:
+     mode: "both"          # "sounddevice", "dante", or "both"
+     stream_name: "Church Translation EN"
+     multicast_address: "239.69.0.1"
+     port: 5004
+     ttl: 32
+   ```
+2. The app broadcasts a continuous AES67 RTP multicast stream with SAP/SDP announcements
+3. In **Dante Controller**, enable AES67 mode and PTPv2 on the receiving device
+4. The stream appears automatically — route it to your outputs
+
+**Multi-language AES67:** Each target language gets its own multicast stream (`.1`, `.2`, `.3`...) with separate SAP announcements.
+
+**Troubleshooting AES67:**
+- Run `python scripts/diagnose_aes67.py` to verify multicast is working
+- Run `python scripts/diagnose_dante.py` for Dante network diagnostics
+- Check Windows Firewall — multicast UDP is commonly blocked
+- Ensure the translation laptop and Dante devices are on the same VLAN/subnet
+
+---
 
 ## Configuration
 
 Edit `config.yaml`:
 
+### Audio
+
 | Setting | Default | Description |
 |---------|---------|-------------|
 | `audio.input_device` | system default | Input device name or index |
 | `audio.output_device` | system default | Output device name or index |
-| `audio.chunk_duration_sec` | 8 | Seconds of audio per processing chunk |
+| `audio.sample_rate` | 48000 | Audio sample rate (Hz) |
+
+### Pipeline / VAD
+
+| Setting | Default | Description |
+|---------|---------|-------------|
+| `pipeline.use_vad` | true | Use voice activity detection (recommended) |
+| `pipeline.vad_aggressiveness` | 2 | Noise filtering 0–3 (2 = typical church, 3 = noisy) |
+| `pipeline.min_chunk_sec` | 2.0 | Minimum speech before emitting a chunk |
+| `pipeline.max_chunk_sec` | 8.0 | Force-split even during continuous speech |
+| `pipeline.silence_threshold_sec` | 0.6 | Silence duration to trigger chunk boundary |
+| `pipeline.context_sentences` | 2 | Previous sentences fed as translation context |
+
+### Models
+
+| Setting | Default | Description |
+|---------|---------|-------------|
 | `transcription.model` | gpt-4o-transcribe | OpenAI STT model |
 | `translation.model` | gpt-4o | Translation model |
-| `synthesis.provider` | elevenlabs | "elevenlabs" or "openai" |
-| `output.mode` | sounddevice | "sounddevice", "dante", or "both" |
+| `synthesis.provider` | elevenlabs | `"elevenlabs"` or `"openai"` |
+
+### Output
+
+| Setting | Default | Description |
+|---------|---------|-------------|
+| `output.mode` | sounddevice | `"sounddevice"`, `"dante"`, or `"both"` |
+| `output.stream_name` | Church Translation EN | AES67 stream name (visible in Dante Controller) |
+| `output.multicast_address` | 239.69.0.1 | AES67 multicast address |
+| `output.port` | 5004 | AES67 RTP port |
+
+### Tuning Latency vs Quality
+
+```yaml
+# Lower latency (faster but may split mid-sentence)
+pipeline:
+  min_chunk_sec: 1.5
+  max_chunk_sec: 5.0
+  silence_threshold_sec: 0.4
+
+# Higher quality (longer chunks = better translation context)
+pipeline:
+  min_chunk_sec: 3.0
+  max_chunk_sec: 10.0
+  silence_threshold_sec: 0.8
+```
+
+---
 
 ## Biblical Language
 
-The translation prompt ensures biblical vocabulary:
+The translation prompt ensures appropriate vocabulary for church services:
 - "foolish" not "stupid"
 - "brethren" not "guys"
 - "transgression" not "mistake"
 - "congregation" not "crowd"
 - Scripture references preserved exactly
 
-See `prompts/biblical_translator.txt` to customize.
+See `prompts/biblical_translator.txt` to customize the translation style.
+
+---
 
 ## Architecture
 
 ```
-┌──────────────┐     ┌──────────────┐     ┌──────────────┐     ┌──────────────┐     ┌──────────────┐
-│  Microphone  │────▶│  Whisper STT │────▶│  GPT-4o      │────▶│  ElevenLabs  │────▶│  Speakers /  │
-│  (Ukrainian) │     │  Transcribe  │     │  Translation  │     │  TTS         │     │  Dante Out   │
-└──────────────┘     └──────────────┘     └──────────────┘     └──────────────┘     └──────────────┘
+┌─────────────┐    ┌─────────────┐    ┌─────────────┐    ┌─────────────┐    ┌──────────────┐
+│  Microphone  │───▶│  VAD Smart  │───▶│ Speculative │───▶│  GPT-4o     │───▶│  Streaming   │
+│  / Dante Via │    │  Chunking   │    │  STT        │    │  Translation │    │  TTS         │
+└─────────────┘    └─────────────┘    └─────────────┘    └─────────────┘    └──────┬───────┘
+                                                                                    │
+                   ┌────────────────────────────────────────────────────────────────┘
+                   │
+        ┌──────────┴──────────┐
+        │  Ordered Playback   │───▶ Local Speakers
+        │  (concurrent slots) │───▶ Dante Via
+        │                     │───▶ AES67 Multicast
+        └─────────────────────┘
 ```
 
-- **VAD smart chunking** — Detects sentence boundaries for natural translation flow
-- **Streaming pipeline** — Overlapped processing for ~2s per-chunk latency
-- **AES67 multicast** — Native network audio output, no Dante Via required
-- **Web dashboard** — Real-time transcript, health checks, device/language selection
+### Key Components
+
+| Component | File | Description |
+|-----------|------|-------------|
+| **VAD Chunker** | `src/vad_chunker.py` | Energy-based VAD with adaptive noise floor, smart force-splitting at silence gaps |
+| **VAD Capture** | `src/vad_capture.py` | Async audio capture with preview snapshots for speculative STT |
+| **Transcriber** | `src/transcriber.py` | OpenAI Whisper STT wrapper |
+| **Translator** | `src/translator.py` | GPT-4o translation with context windowing |
+| **Synthesizer** | `src/synthesizer.py` | Streaming TTS via ElevenLabs or OpenAI (batch + stream modes) |
+| **AES67 Sender** | `src/aes67_output.py` | Continuous RTP multicast with SAP/SDP announcements |
+| **Audio Playback** | `src/audio_playback.py` | Local speaker output via sounddevice |
+| **Dashboard** | `dashboard/server.py` | Web UI, API, pipeline orchestration, WebSocket live updates |
+
+### Diagnostic Tools
+
+| Script | Description |
+|--------|-------------|
+| `scripts/diagnose_aes67.py` | Verify multicast send/receive, check firewall, inspect network interfaces |
+| `scripts/diagnose_dante.py` | Dante/AES67 network diagnostics |
+| `scripts/list_devices.py` | List available audio input/output devices |
+| `scripts/test_aes67.py` | Test AES67 stream output |
+
+---
 
 ## Testing
 
@@ -158,7 +297,7 @@ source venv/bin/activate
 python -m pytest tests/ -v
 ```
 
-33 tests covering imports, config, dashboard API, pipeline, launcher, AES67, and OS scripts.
+Tests cover imports, config, dashboard API, VAD pipeline, audio device handling, WebSocket error handling, launcher scripts, and AES67 output.
 
 ---
 
