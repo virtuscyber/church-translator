@@ -143,3 +143,47 @@ def test_streaming_pipeline_uses_fixed_chunk_capture_when_vad_disabled(monkeypat
     assert any(name == "translator_init" for name, _ in recorder.calls)
     assert any(name == "synth_init" for name, _ in recorder.calls)
     assert any(name == "aes67_init" for name, _ in recorder.calls)
+
+
+@pytest.mark.asyncio
+async def test_streaming_pipeline_capture_worker_unpacks_vad_chunks(monkeypatch):
+    import src.streaming_pipeline as streaming_module
+
+    class FakeCapture:
+        def __init__(self, **kwargs):
+            self.calls = 0
+
+        async def get_chunk(self):
+            self.calls += 1
+            if self.calls == 1:
+                return ("preview", b"preview-wav")
+            pipeline._running = False
+            return ("final", b"final-wav")
+
+    class FakeTranscriber:
+        def __init__(self, **kwargs):
+            pass
+
+    class FakeTranslator:
+        def __init__(self, **kwargs):
+            pass
+
+    class FakeSynthesizer:
+        def __init__(self, **kwargs):
+            pass
+
+    monkeypatch.setattr("src.vad_capture.VADAudioCapture", FakeCapture)
+    monkeypatch.setattr(streaming_module, "Transcriber", FakeTranscriber)
+    monkeypatch.setattr(streaming_module, "Translator", FakeTranslator)
+    monkeypatch.setattr(streaming_module, "Synthesizer", FakeSynthesizer)
+
+    cfg = Config()
+    cfg.pipeline.use_vad = True
+
+    pipeline = streaming_module.StreamingPipeline(cfg)
+    pipeline._running = True
+
+    await pipeline._capture_worker()
+
+    queued = await pipeline._stt_queue.get()
+    assert queued.wav_bytes == b"final-wav"

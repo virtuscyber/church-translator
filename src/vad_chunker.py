@@ -101,9 +101,11 @@ class VADChunker:
         
         # Frame size in input sample rate
         self._frame_samples = int(input_sample_rate * FRAME_MS / 1000)
+        self._preroll_frame_limit = max(1, int(round(1.0 / (FRAME_MS / 1000))))
         
         # Internal state
         self._audio_buffer: list[np.ndarray] = []
+        self._preroll_buffer: deque[np.ndarray] = deque(maxlen=self._preroll_frame_limit)
         self._buffered_seconds: float = 0.0
         self._speech_started = False
         self._silence_frames = 0
@@ -131,10 +133,7 @@ class VADChunker:
         if audio.ndim > 1:
             audio = audio[:, 0]
         audio = audio.astype(np.float32)
-        
-        self._audio_buffer.append(audio.copy())
-        self._buffered_seconds += len(audio) / self.input_sample_rate
-        
+
         # Prepend leftover from last call
         if len(self._leftover) > 0:
             analysis_audio = np.concatenate([self._leftover, audio])
@@ -147,6 +146,12 @@ class VADChunker:
         while offset + self._frame_samples <= len(analysis_audio):
             frame = analysis_audio[offset:offset + self._frame_samples]
             offset += self._frame_samples
+
+            if self._speech_started:
+                self._audio_buffer.append(frame.copy())
+                self._buffered_seconds += len(frame) / self.input_sample_rate
+            else:
+                self._preroll_buffer.append(frame.copy())
             
             is_speech = self.vad.is_speech(frame)
             
@@ -161,11 +166,19 @@ class VADChunker:
                 self._silence_frames = 0
                 self._speech_frames_total += 1
                 if not self._speech_started:
+                    if self._preroll_buffer:
+                        self._audio_buffer.extend(self._preroll_buffer)
+                        self._buffered_seconds = sum(len(chunk) for chunk in self._audio_buffer) / self.input_sample_rate
+                    self._preroll_buffer.clear()
                     self._speech_started = True
             else:
-                if self._silence_frames == 0:
-                    self._current_gap_start = self._buffered_seconds
-                self._silence_frames += 1
+                if self._speech_started:
+                    if self._silence_frames == 0:
+                        self._current_gap_start = max(
+                            0.0,
+                            self._buffered_seconds - (len(frame) / self.input_sample_rate),
+                        )
+                    self._silence_frames += 1
             
             silence_duration = self._silence_frames * FRAME_MS / 1000.0
             
@@ -200,6 +213,7 @@ class VADChunker:
 
     def flush(self) -> Optional[bytes]:
         """Flush any remaining buffered audio as a final chunk."""
+        self._preroll_buffer.clear()
         if self._audio_buffer and self._buffered_seconds >= 0.5:
             return self._emit_chunk()
         return None
@@ -263,6 +277,7 @@ class VADChunker:
         
         # Reset state, keeping remainder in buffer
         self._audio_buffer = [remainder] if len(remainder) > 0 else []
+        self._preroll_buffer.clear()
         self._buffered_seconds = len(remainder) / self.input_sample_rate
         self._speech_started = len(remainder) > 0
         self._silence_frames = 0
@@ -305,6 +320,7 @@ class VADChunker:
         
         # Reset state
         self._audio_buffer = []
+        self._preroll_buffer.clear()
         self._buffered_seconds = 0.0
         self._speech_started = False
         self._silence_frames = 0

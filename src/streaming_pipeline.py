@@ -230,9 +230,15 @@ class StreamingPipeline:
         """Captures audio chunks and feeds them to STT queue."""
         logger.info("🎤 Capture worker started")
         while self._running:
-            wav_bytes = await self.capture.get_chunk()
-            if wav_bytes is None:
+            captured = await self.capture.get_chunk()
+            if captured is None:
                 continue
+            if isinstance(captured, tuple):
+                tag, wav_bytes = captured
+                if tag != "final":
+                    continue
+            else:
+                wav_bytes = captured
             
             self._seq += 1
             chunk = ChunkState(seq=self._seq, wav_bytes=wav_bytes)
