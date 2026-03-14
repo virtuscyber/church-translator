@@ -123,7 +123,9 @@ class TranslationPipeline:
         if self.aes67:
             self.aes67.stop()
         await self.capture.stop()
-        
+        if self.playback:
+            await self.playback.close()
+
         if self._chunks_processed > 0:
             avg_latency = self._total_latency / self._chunks_processed
             logger.info(

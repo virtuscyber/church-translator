@@ -191,6 +191,8 @@ class StreamingPipeline:
         if self.aes67:
             self.aes67.stop()
         await self.capture.stop()
+        if self.playback:
+            await self.playback.close()
 
         # Send poison pills to drain queues
         sentinel = ChunkState(seq=-1)

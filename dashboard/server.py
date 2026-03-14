@@ -1006,6 +1006,13 @@ async def _stop_live_pipeline(*, notify_clients: bool) -> None:
             logger.warning("Error stopping capture: %s", e)
         state.live_capture = None
 
+    if state.live_playback:
+        try:
+            await state.live_playback.close()
+            logger.info("Live playback stream closed")
+        except Exception as e:
+            logger.warning("Error closing playback stream: %s", e)
+
     if state.live_aes67:
         try:
             state.live_aes67.stop()
@@ -1465,6 +1472,11 @@ async def _run_live_pipeline():
             except Exception:
                 pass
             state.live_aes67 = None
+        if state.live_playback:
+            try:
+                await state.live_playback.close()
+            except Exception:
+                pass
         state.live_playback = None
         state.live_running = False
         state.running = False
