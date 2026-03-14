@@ -61,6 +61,9 @@ async def test_translation_pipeline_wires_components_and_processes_audio(monkeyp
         async def play(self, audio_bytes):
             recorder.calls.append(("playback_play", audio_bytes))
 
+        async def close(self):
+            pass
+
     class FakeAES67:
         def __init__(self, **kwargs):
             recorder.calls.append(("aes67_init", kwargs))
