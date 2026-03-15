@@ -702,7 +702,7 @@ async def api_save_config(request):
     """Save device/language config."""
     data = await request.json()
     # Only allow safe keys
-    allowed = {"input_device", "output_device", "source_language", "target_language", "custom_vocabulary", "elevenlabs_voice_id", "stt_model", "translation_model", "tts_model", "preferred_input_fingerprint", "preferred_output_fingerprint"}
+    allowed = {"input_device", "output_device", "source_language", "target_language", "custom_vocabulary", "elevenlabs_voice_id", "stt_model", "translation_model", "tts_model", "refine_enabled", "refine_model", "preferred_input_fingerprint", "preferred_output_fingerprint"}
     filtered = {k: v for k, v in data.items() if k in allowed}
     save_config(filtered)
     return web.json_response({"ok": True})
@@ -864,6 +864,7 @@ async def _run_file_test(file_path: str):
         from src.config import load_config
         from src.transcriber import Transcriber
         from src.translator import Translator
+        from src.refiner import Refiner
         from src.vad_chunker import FileVADChunker
         import subprocess
         import tempfile
@@ -893,6 +894,15 @@ async def _run_file_test(file_path: str):
             model=config.translation.model,
             temperature=config.translation.temperature,
             context_sentences=config.pipeline.context_sentences,
+        )
+
+        # Text refinement layer — cleans up filler, false starts, awkward phrasing
+        refine_enabled = saved.get("refine_enabled", True)
+        refine_model = saved.get("refine_model", "gpt-4o-mini")
+        refiner = Refiner(
+            api_key=config.openai_api_key,
+            model=refine_model,
+            enabled=refine_enabled,
         )
 
         with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
@@ -939,6 +949,9 @@ async def _run_file_test(file_path: str):
             if not tgt_text:
                 continue
 
+            # Refine: clean up filler, false starts, awkward phrasing
+            refined_text = await refiner.refine(tgt_text)
+
             latency = time.time() - t0
             total_latency += latency
             state.stats["chunks_processed"] = i + 1
@@ -947,14 +960,15 @@ async def _run_file_test(file_path: str):
             entry = {
                 "seq": i + 1,
                 "source": src_text,
-                "translated": tgt_text,
+                "translated": refined_text,
+                "raw_translation": tgt_text if tgt_text != refined_text else None,
                 "source_lang": src_lang,
                 "target_lang": tgt_lang,
                 "latency": round(latency, 1),
                 "timestamp": time.time(),
                 # Keep backward compat
                 "ukrainian": src_text,
-                "english": tgt_text,
+                "english": refined_text,
             }
             state.transcript.append(entry)
 
@@ -1090,6 +1104,7 @@ async def _run_live_pipeline():
         from src.config import load_config
         from src.transcriber import Transcriber
         from src.translator import Translator
+        from src.refiner import Refiner
         from src.synthesizer import Synthesizer
         from src.vad_capture import VADAudioCapture
         from src.audio_playback import AudioPlayback
@@ -1155,6 +1170,15 @@ async def _run_live_pipeline():
             model=config.translation.model,
             temperature=config.translation.temperature,
             context_sentences=config.pipeline.context_sentences,
+        )
+
+        # Text refinement layer — cleans up filler, false starts, awkward phrasing
+        refine_enabled = saved.get("refine_enabled", True)
+        refine_model = saved.get("refine_model", "gpt-4o-mini")
+        refiner = Refiner(
+            api_key=config.openai_api_key,
+            model=refine_model,
+            enabled=refine_enabled,
         )
 
         synthesizer = Synthesizer(
@@ -1302,6 +1326,9 @@ async def _run_live_pipeline():
                 if not tgt_text:
                     return
 
+                # Refine: clean up filler, false starts, awkward phrasing
+                refined_text = await asyncio.wait_for(refiner.refine(tgt_text), timeout=10.0)
+
                 latency = time.time() - t0
                 total_latency += latency
                 state.stats["chunks_processed"] = seq
@@ -1310,13 +1337,14 @@ async def _run_live_pipeline():
                 entry = {
                     "seq": seq,
                     "source": src_text,
-                    "translated": tgt_text,
+                    "translated": refined_text,
+                    "raw_translation": tgt_text if tgt_text != refined_text else None,
                     "source_lang": src_lang,
                     "target_lang": tgt_lang,
                     "latency": round(latency, 1),
                     "timestamp": time.time(),
                     "ukrainian": src_text,
-                    "english": tgt_text,
+                    "english": refined_text,
                 }
                 state.transcript.append(entry)
 
@@ -1334,7 +1362,7 @@ async def _run_live_pipeline():
                 # TTS — stream chunks into our slot
                 # Playback worker will drain this slot when it's our turn
                 tts_started = False
-                async for audio_chunk in synthesizer.synthesize_stream(tgt_text):
+                async for audio_chunk in synthesizer.synthesize_stream(refined_text):
                     if not tts_started:
                         tts_time_to_first = time.time() - t0 - latency
                         logger.info("[Chunk %d] TTS first audio in %.2fs", seq, tts_time_to_first)
