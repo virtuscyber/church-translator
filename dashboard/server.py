@@ -864,6 +864,7 @@ async def _run_file_test(file_path: str):
         from src.config import load_config
         from src.transcriber import Transcriber
         from src.translator import Translator
+        from src.session_logger import SessionLogger
         from src.vad_chunker import FileVADChunker
         import subprocess
         import tempfile
@@ -918,6 +919,9 @@ async def _run_file_test(file_path: str):
 
         total_latency = 0.0
 
+        # Session logger — captures every pipeline stage for review
+        session_log = SessionLogger(mode="file", config=saved)
+
         for i, wav_chunk in enumerate(chunks):
             if not state.running:
                 break
@@ -944,6 +948,17 @@ async def _run_file_test(file_path: str):
             state.stats["chunks_processed"] = i + 1
             state.stats["avg_latency"] = total_latency / (i + 1)
 
+            # Log all pipeline stages side-by-side
+            session_log.log_chunk(
+                seq=i + 1,
+                stt=src_text,
+                translation=tgt_text,
+                tts_text=tgt_text,
+                latency_sec=latency,
+                source_lang=src_lang,
+                target_lang=tgt_lang,
+            )
+
             entry = {
                 "seq": i + 1,
                 "source": src_text,
@@ -969,6 +984,7 @@ async def _run_file_test(file_path: str):
                 },
             })
 
+        session_log.finish()
         state.running = False
         state.stats["status"] = "stopped"
         state.stats["total_runtime"] = time.time() - state.start_time
@@ -1090,6 +1106,7 @@ async def _run_live_pipeline():
         from src.config import load_config
         from src.transcriber import Transcriber
         from src.translator import Translator
+        from src.session_logger import SessionLogger
         from src.synthesizer import Synthesizer
         from src.vad_capture import VADAudioCapture
         from src.audio_playback import AudioPlayback
@@ -1201,6 +1218,9 @@ async def _run_live_pipeline():
         total_latency = 0.0
         chunk_count = 0
 
+        # Session logger — captures every pipeline stage for review
+        session_log = SessionLogger(mode="live", config=saved)
+
         # ── Ordered concurrent playback system ──────────────────────
         # Each chunk gets a "slot" (asyncio.Queue). Chunks process
         # concurrently (STT + translate + TTS), but audio plays back
@@ -1306,6 +1326,17 @@ async def _run_live_pipeline():
                 total_latency += latency
                 state.stats["chunks_processed"] = seq
                 state.stats["avg_latency"] = total_latency / seq
+
+                # Log all pipeline stages side-by-side
+                session_log.log_chunk(
+                    seq=seq,
+                    stt=src_text,
+                    translation=tgt_text,
+                    tts_text=tgt_text,
+                    latency_sec=latency,
+                    source_lang=src_lang,
+                    target_lang=tgt_lang,
+                )
 
                 entry = {
                     "seq": seq,
@@ -1484,6 +1515,10 @@ async def _run_live_pipeline():
         state.stats["total_runtime"] = time.time() - state.start_time
         state.live_pipeline = None
         state.live_task = None
+        try:
+            session_log.finish()
+        except Exception:
+            pass
         logger.info("Live pipeline fully stopped and cleaned up")
 
 
@@ -1569,6 +1604,70 @@ async def api_health(request):
     return web.json_response({"healthy": all_ok, "checks": checks})
 
 
+# ── Session Logs API ────────────────────────────────────────────
+
+async def api_sessions(request):
+    """List recent session logs."""
+    from src.session_logger import list_sessions
+    limit = int(request.query.get("limit", "50"))
+    return web.json_response({"sessions": list_sessions(limit=limit)})
+
+
+async def api_session_detail(request):
+    """Get a full session log by ID."""
+    from src.session_logger import get_session
+    session_id = request.match_info["session_id"]
+    data = get_session(session_id)
+    if data is None:
+        return web.json_response({"error": "Session not found"}, status=404)
+    return web.json_response(data)
+
+
+async def api_session_export(request):
+    """Export a session log as a downloadable text file (side-by-side format)."""
+    from src.session_logger import get_session
+    session_id = request.match_info["session_id"]
+    data = get_session(session_id)
+    if data is None:
+        return web.json_response({"error": "Session not found"}, status=404)
+
+    lines = []
+    lines.append(f"Session: {data['session_id']}")
+    lines.append(f"Mode: {data['mode']}")
+    lines.append(f"Started: {data['started_at']}")
+    lines.append(f"Ended: {data.get('ended_at', 'in progress')}")
+    cfg = data.get("config", {})
+    lines.append(f"Languages: {cfg.get('source_language', '?')} → {cfg.get('target_language', '?')}")
+    lines.append("=" * 80)
+    lines.append("")
+
+    for chunk in data.get("chunks", []):
+        lines.append(f"--- Chunk #{chunk['seq']} ({chunk.get('latency_sec', 0)}s) ---")
+        lines.append(f"  STT:         {chunk.get('stt', '')}")
+        lines.append(f"  Translation: {chunk.get('translation', '')}")
+        if chunk.get("refined"):
+            lines.append(f"  Refined:     {chunk['refined']}")
+        lines.append(f"  TTS Text:    {chunk.get('tts_text', '')}")
+        lines.append("")
+
+    text = "\n".join(lines)
+    return web.Response(
+        text=text,
+        content_type="text/plain",
+        headers={
+            "Content-Disposition": f'attachment; filename="session_{session_id}.txt"',
+        },
+    )
+
+
+async def session_logs_page(request):
+    """Serve the session logs viewer page."""
+    html_path = Path(__file__).parent / "logs.html"
+    if not html_path.exists():
+        return web.Response(text="Session logs page not found", status=404)
+    return web.FileResponse(html_path)
+
+
 # ── WebSocket ───────────────────────────────────────────────────
 
 async def websocket_handler(request):
@@ -1652,6 +1751,11 @@ def create_app():
     app.router.add_post("/api/stop-live", api_stop_live)
     # Health check
     app.router.add_get("/api/health", api_health)
+    # Session logs
+    app.router.add_get("/logs", session_logs_page)
+    app.router.add_get("/api/sessions", api_sessions)
+    app.router.add_get("/api/sessions/{session_id}", api_session_detail)
+    app.router.add_get("/api/sessions/{session_id}/export", api_session_export)
     # Static assets
     static_path = Path(__file__).parent / "static"
     if static_path.exists():
