@@ -31,6 +31,7 @@ class Synthesizer:
         elevenlabs_similarity: float = 0.8,
         openai_model: str = "gpt-4o-mini-tts",
         openai_voice: str = "onyx",
+        speed: float = 1.0,
     ):
         self.provider = provider
         self.openai_api_key = openai_api_key
@@ -43,6 +44,8 @@ class Synthesizer:
         # OpenAI settings
         self.oai_model = openai_model
         self.oai_voice = openai_voice
+        # Speed
+        self.speed = speed
 
     # ── Batch mode (original interface, unchanged) ────────────────────
 
@@ -110,7 +113,7 @@ class Synthesizer:
 
         client = AsyncElevenLabs(api_key=self.elevenlabs_api_key)
 
-        audio_iter = client.text_to_speech.convert(
+        convert_kwargs = dict(
             voice_id=self.el_voice_id,
             text=text,
             model_id=self.el_model,
@@ -120,6 +123,10 @@ class Synthesizer:
             },
             output_format="pcm_24000",
         )
+        if self.speed != 1.0:
+            convert_kwargs["speed"] = self.speed
+
+        audio_iter = client.text_to_speech.convert(**convert_kwargs)
 
         buffer = bytearray()
         first_chunk = True
@@ -182,7 +189,7 @@ class Synthesizer:
             voice=self.oai_voice,
             input=text,
             response_format="pcm",
-            speed=1.0,
+            speed=self.speed,
         )
 
         # OpenAI returns the full response — check if we can stream it
@@ -224,7 +231,7 @@ class Synthesizer:
 
         client = AsyncElevenLabs(api_key=self.elevenlabs_api_key)
 
-        audio_iter = client.text_to_speech.convert(
+        convert_kwargs = dict(
             voice_id=self.el_voice_id,
             text=text,
             model_id=self.el_model,
@@ -234,6 +241,10 @@ class Synthesizer:
             },
             output_format="pcm_24000",
         )
+        if self.speed != 1.0:
+            convert_kwargs["speed"] = self.speed
+
+        audio_iter = client.text_to_speech.convert(**convert_kwargs)
 
         chunks = []
         if hasattr(audio_iter, '__aiter__'):
@@ -266,7 +277,7 @@ class Synthesizer:
             voice=self.oai_voice,
             input=text,
             response_format="pcm",
-            speed=1.0,
+            speed=self.speed,
         )
 
         return response.content
