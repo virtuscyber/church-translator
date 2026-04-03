@@ -723,12 +723,18 @@
         <!-- Model Selection -->
         <div class="form-row">
             <div class="form-group">
-                <label>🧠 Speech-to-Text Model</label>
-                <select id="sttModel">
-                    <option value="gpt-4o-transcribe">gpt-4o-transcribe (Best accuracy, slower)</option>
-                    <option value="gpt-4o-mini-transcribe">gpt-4o-mini-transcribe (Fast, good accuracy)</option>
-                    <option value="whisper-1">whisper-1 (Fastest, basic accuracy)</option>
-                </select>
+                <label>🧠 Speech-to-Text</label>
+                <div style="display:flex;gap:8px;margin-bottom:6px;">
+                    <select id="sttProvider" style="width:auto;min-width:130px;">
+                        <option value="openai">OpenAI</option>
+                        <option value="elevenlabs">ElevenLabs Scribe v2</option>
+                    </select>
+                    <select id="sttModel" style="flex:1;">
+                        <option value="gpt-4o-transcribe">gpt-4o-transcribe (Best accuracy, slower)</option>
+                        <option value="gpt-4o-mini-transcribe">gpt-4o-mini-transcribe (Fast, good accuracy)</option>
+                        <option value="whisper-1">whisper-1 (Fastest, basic accuracy)</option>
+                    </select>
+                </div>
                 <div class="model-note" id="sttNote" style="font-size:0.75em;color:var(--text-dim);margin-top:2px;"></div>
             </div>
             <div class="form-group">
@@ -761,6 +767,24 @@
                 <button class="btn btn-secondary btn-sm" onclick="previewVoice()" title="Preview selected voice">▶️ Preview</button>
             </div>
             <div id="voiceInfo" style="font-size:0.8em;color:var(--text-dim);margin-top:4px;"></div>
+            </div>
+        </div>
+
+        <!-- TTS Speed Control -->
+        <div class="form-group" style="margin-top:4px;">
+            <label>🏎️ Speech Speed</label>
+            <div style="display:flex;align-items:center;gap:12px;">
+                <input type="range" id="ttsSpeed" min="0.7" max="2.0" step="0.05" value="1.0"
+                    style="flex:1;accent-color:var(--accent);cursor:pointer;">
+                <span id="ttsSpeedValue" style="font-size:1.1em;font-weight:700;min-width:50px;text-align:center;color:var(--accent);">1.0×</span>
+            </div>
+            <div style="display:flex;justify-content:space-between;font-size:0.7em;color:var(--text-dim);margin-top:2px;">
+                <span>🐢 Slower</span>
+                <span>Normal</span>
+                <span>Faster 🐇</span>
+            </div>
+            <div id="speedNote" style="font-size:0.75em;color:var(--text-dim);margin-top:4px;">
+                ElevenLabs: 0.7–1.2× recommended | OpenAI: 0.25–4.0× supported
             </div>
         </div>
 
@@ -1346,6 +1370,27 @@
     updateModelNote('translationModel', 'translationNote', 'translation');
     updateModelNote('ttsModel', 'ttsNote', 'tts');
 
+    // ── TTS Speed Slider ────────────────────────────
+    const speedSlider = document.getElementById('ttsSpeed');
+    const speedValue = document.getElementById('ttsSpeedValue');
+    speedSlider.addEventListener('input', () => {
+        speedValue.textContent = parseFloat(speedSlider.value).toFixed(2) + '×';
+    });
+
+    // ── STT Provider Toggle ─────────────────────────
+    const sttProviderSel = document.getElementById('sttProvider');
+    const sttModelSel = document.getElementById('sttModel');
+    sttProviderSel.addEventListener('change', () => {
+        if (sttProviderSel.value === 'elevenlabs') {
+            sttModelSel.style.display = 'none';
+            document.getElementById('sttNote').textContent =
+                '🎯 ElevenLabs Scribe v2 — high accuracy across 90+ languages. Uses your ElevenLabs API key.';
+        } else {
+            sttModelSel.style.display = '';
+            updateModelNote('sttModel', 'sttNote', 'stt');
+        }
+    });
+
     // ── Voice Selection ─────────────────────────────
     let voicesData = [];
     let voicePreviewAudio = null;
@@ -1435,9 +1480,18 @@
                 document.getElementById('voiceSelect').value = cfg.elevenlabs_voice_id;
                 updateVoiceInfo();
             }
+            if (cfg.stt_provider) {
+                document.getElementById('sttProvider').value = cfg.stt_provider;
+                // Trigger provider change to show/hide model select
+                sttProviderSel.dispatchEvent(new Event('change'));
+            }
             if (cfg.stt_model) {
                 document.getElementById('sttModel').value = cfg.stt_model;
                 updateModelNote('sttModel', 'sttNote', 'stt');
+            }
+            if (cfg.tts_speed !== undefined && cfg.tts_speed !== null) {
+                document.getElementById('ttsSpeed').value = cfg.tts_speed;
+                document.getElementById('ttsSpeedValue').textContent = parseFloat(cfg.tts_speed).toFixed(2) + '×';
             }
             if (cfg.translation_model) {
                 document.getElementById('translationModel').value = cfg.translation_model;
@@ -1482,9 +1536,11 @@
             target_language: document.getElementById('targetLang').value,
             custom_vocabulary: document.getElementById('customVocab').value,
             elevenlabs_voice_id: document.getElementById('voiceSelect').value || null,
+            stt_provider: document.getElementById('sttProvider').value,
             stt_model: document.getElementById('sttModel').value,
             translation_model: document.getElementById('translationModel').value,
             tts_model: document.getElementById('ttsModel').value,
+            tts_speed: parseFloat(document.getElementById('ttsSpeed').value),
             refine_enabled: document.getElementById('refineEnabled').checked,
             refine_model: document.getElementById('refineModel').value,
         };

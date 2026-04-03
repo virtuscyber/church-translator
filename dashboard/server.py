@@ -702,7 +702,7 @@ async def api_save_config(request):
     """Save device/language config."""
     data = await request.json()
     # Only allow safe keys
-    allowed = {"input_device", "output_device", "source_language", "target_language", "custom_vocabulary", "elevenlabs_voice_id", "stt_model", "translation_model", "tts_model", "refine_enabled", "refine_model", "preferred_input_fingerprint", "preferred_output_fingerprint"}
+    allowed = {"input_device", "output_device", "source_language", "target_language", "custom_vocabulary", "elevenlabs_voice_id", "stt_model", "stt_provider", "translation_model", "tts_model", "tts_speed", "refine_enabled", "refine_model", "preferred_input_fingerprint", "preferred_output_fingerprint"}
     filtered = {k: v for k, v in data.items() if k in allowed}
     save_config(filtered)
     return web.json_response({"ok": True})
@@ -878,8 +878,11 @@ async def _run_file_test(file_path: str):
         tgt_lang = saved.get("target_language", "en")
         custom_vocab = saved.get("custom_vocabulary", "")
 
+        stt_provider = saved.get("stt_provider", config.transcription.provider)
         transcriber = Transcriber(
+            provider=stt_provider,
             api_key=config.openai_api_key,
+            elevenlabs_api_key=config.elevenlabs_api_key,
             model=config.transcription.model,
             language=src_lang,
         )
@@ -1172,8 +1175,14 @@ async def _run_live_pipeline():
             preview_after_sec=config.pipeline.min_chunk_sec,
         )
 
+        # Override STT provider and TTS speed from saved config
+        stt_provider = saved.get("stt_provider", config.transcription.provider)
+        tts_speed = float(saved.get("tts_speed", config.synthesis.speed))
+
         transcriber = Transcriber(
+            provider=stt_provider,
             api_key=config.openai_api_key,
+            elevenlabs_api_key=config.elevenlabs_api_key,
             model=config.transcription.model,
             language=src_lang,
         )
@@ -1209,6 +1218,7 @@ async def _run_live_pipeline():
             elevenlabs_similarity=config.synthesis.elevenlabs.similarity_boost,
             openai_model=config.synthesis.openai.model,
             openai_voice=config.synthesis.openai.voice,
+            speed=tts_speed,
         )
 
         playback = AudioPlayback(
