@@ -22,6 +22,7 @@ class AudioConfig:
 
 @dataclass
 class TranscriptionConfig:
+    provider: str = "openai"  # "openai" or "elevenlabs"
     model: str = "gpt-4o-transcribe"
     language: str = "uk"
 
@@ -58,6 +59,7 @@ class OpenAITTSConfig:
 @dataclass
 class SynthesisConfig:
     provider: str = "elevenlabs"
+    speed: float = 1.0  # Speech speed multiplier (ElevenLabs: ~0.7-1.2, OpenAI: 0.25-4.0)
     elevenlabs: ElevenLabsConfig = field(default_factory=ElevenLabsConfig)
     openai: OpenAITTSConfig = field(default_factory=OpenAITTSConfig)
 

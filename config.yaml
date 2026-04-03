@@ -6,7 +6,8 @@ audio:
   chunk_duration_sec: 4       # Seconds of audio per STT chunk
 
 transcription:
-  model: "gpt-4o-transcribe"
+  provider: "openai"          # "openai" or "elevenlabs"
+  model: "gpt-4o-transcribe"  # OpenAI model (used when provider=openai)
   language: "uk"              # Ukrainian (ISO 639-1)
 
 translation:
@@ -16,6 +17,7 @@ translation:
 
 synthesis:
   provider: "elevenlabs"      # "elevenlabs" or "openai"
+  speed: 1.0                  # Speech speed multiplier (ElevenLabs: ~0.7-1.2, OpenAI: 0.25-4.0)
   elevenlabs:
     model: "eleven_turbo_v2_5"
     voice_id: "pNInz6obpgDQGcFmaJgB"   # Adam

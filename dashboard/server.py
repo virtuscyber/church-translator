@@ -702,7 +702,7 @@ async def api_save_config(request):
     """Save device/language config."""
     data = await request.json()
     # Only allow safe keys
-    allowed = {"input_device", "output_device", "source_language", "target_language", "custom_vocabulary", "elevenlabs_voice_id", "stt_model", "translation_model", "tts_model", "preferred_input_fingerprint", "preferred_output_fingerprint"}
+    allowed = {"input_device", "output_device", "source_language", "target_language", "custom_vocabulary", "elevenlabs_voice_id", "stt_model", "stt_provider", "translation_model", "tts_model", "tts_speed", "refine_enabled", "refine_model", "preferred_input_fingerprint", "preferred_output_fingerprint"}
     filtered = {k: v for k, v in data.items() if k in allowed}
     save_config(filtered)
     return web.json_response({"ok": True})
@@ -864,6 +864,8 @@ async def _run_file_test(file_path: str):
         from src.config import load_config
         from src.transcriber import Transcriber
         from src.translator import Translator
+        from src.refiner import Refiner
+        from src.session_logger import SessionLogger
         from src.vad_chunker import FileVADChunker
         import subprocess
         import tempfile
@@ -876,8 +878,11 @@ async def _run_file_test(file_path: str):
         tgt_lang = saved.get("target_language", "en")
         custom_vocab = saved.get("custom_vocabulary", "")
 
+        stt_provider = saved.get("stt_provider", config.transcription.provider)
         transcriber = Transcriber(
+            provider=stt_provider,
             api_key=config.openai_api_key,
+            elevenlabs_api_key=config.elevenlabs_api_key,
             model=config.transcription.model,
             language=src_lang,
         )
@@ -893,6 +898,15 @@ async def _run_file_test(file_path: str):
             model=config.translation.model,
             temperature=config.translation.temperature,
             context_sentences=config.pipeline.context_sentences,
+        )
+
+        # Text refinement layer — cleans up filler, false starts, awkward phrasing
+        refine_enabled = saved.get("refine_enabled", True)
+        refine_model = saved.get("refine_model", "gpt-4o-mini")
+        refiner = Refiner(
+            api_key=config.openai_api_key,
+            model=refine_model,
+            enabled=refine_enabled,
         )
 
         with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
@@ -918,6 +932,9 @@ async def _run_file_test(file_path: str):
 
         total_latency = 0.0
 
+        # Session logger — captures every pipeline stage for review
+        session_log = SessionLogger(mode="file", config=saved)
+
         for i, wav_chunk in enumerate(chunks):
             if not state.running:
                 break
@@ -939,22 +956,38 @@ async def _run_file_test(file_path: str):
             if not tgt_text:
                 continue
 
+            # Refine: clean up filler, false starts, awkward phrasing
+            refined_text = await refiner.refine(tgt_text)
+
             latency = time.time() - t0
             total_latency += latency
             state.stats["chunks_processed"] = i + 1
             state.stats["avg_latency"] = total_latency / (i + 1)
 
+            # Log all pipeline stages side-by-side
+            session_log.log_chunk(
+                seq=i + 1,
+                stt=src_text,
+                translation=tgt_text,
+                refined=refined_text if refined_text != tgt_text else None,
+                tts_text=refined_text,
+                latency_sec=latency,
+                source_lang=src_lang,
+                target_lang=tgt_lang,
+            )
+
             entry = {
                 "seq": i + 1,
                 "source": src_text,
-                "translated": tgt_text,
+                "translated": refined_text,
+                "raw_translation": tgt_text if tgt_text != refined_text else None,
                 "source_lang": src_lang,
                 "target_lang": tgt_lang,
                 "latency": round(latency, 1),
                 "timestamp": time.time(),
                 # Keep backward compat
                 "ukrainian": src_text,
-                "english": tgt_text,
+                "english": refined_text,
             }
             state.transcript.append(entry)
 
@@ -969,6 +1002,7 @@ async def _run_file_test(file_path: str):
                 },
             })
 
+        session_log.finish()
         state.running = False
         state.stats["status"] = "stopped"
         state.stats["total_runtime"] = time.time() - state.start_time
@@ -1090,6 +1124,8 @@ async def _run_live_pipeline():
         from src.config import load_config
         from src.transcriber import Transcriber
         from src.translator import Translator
+        from src.refiner import Refiner
+        from src.session_logger import SessionLogger
         from src.synthesizer import Synthesizer
         from src.vad_capture import VADAudioCapture
         from src.audio_playback import AudioPlayback
@@ -1139,8 +1175,14 @@ async def _run_live_pipeline():
             preview_after_sec=config.pipeline.min_chunk_sec,
         )
 
+        # Override STT provider and TTS speed from saved config
+        stt_provider = saved.get("stt_provider", config.transcription.provider)
+        tts_speed = float(saved.get("tts_speed", config.synthesis.speed))
+
         transcriber = Transcriber(
+            provider=stt_provider,
             api_key=config.openai_api_key,
+            elevenlabs_api_key=config.elevenlabs_api_key,
             model=config.transcription.model,
             language=src_lang,
         )
@@ -1157,6 +1199,15 @@ async def _run_live_pipeline():
             context_sentences=config.pipeline.context_sentences,
         )
 
+        # Text refinement layer — cleans up filler, false starts, awkward phrasing
+        refine_enabled = saved.get("refine_enabled", True)
+        refine_model = saved.get("refine_model", "gpt-4o-mini")
+        refiner = Refiner(
+            api_key=config.openai_api_key,
+            model=refine_model,
+            enabled=refine_enabled,
+        )
+
         synthesizer = Synthesizer(
             provider=config.synthesis.provider,
             openai_api_key=config.openai_api_key,
@@ -1167,6 +1218,7 @@ async def _run_live_pipeline():
             elevenlabs_similarity=config.synthesis.elevenlabs.similarity_boost,
             openai_model=config.synthesis.openai.model,
             openai_voice=config.synthesis.openai.voice,
+            speed=tts_speed,
         )
 
         playback = AudioPlayback(
@@ -1200,6 +1252,9 @@ async def _run_live_pipeline():
         tgt_name = lang_names.get(tgt_lang, tgt_lang)
         total_latency = 0.0
         chunk_count = 0
+
+        # Session logger — captures every pipeline stage for review
+        session_log = SessionLogger(mode="live", config=saved)
 
         # ── Ordered concurrent playback system ──────────────────────
         # Each chunk gets a "slot" (asyncio.Queue). Chunks process
@@ -1302,21 +1357,37 @@ async def _run_live_pipeline():
                 if not tgt_text:
                     return
 
+                # Refine: clean up filler, false starts, awkward phrasing
+                refined_text = await asyncio.wait_for(refiner.refine(tgt_text), timeout=10.0)
+
                 latency = time.time() - t0
                 total_latency += latency
                 state.stats["chunks_processed"] = seq
                 state.stats["avg_latency"] = total_latency / seq
 
+                # Log all pipeline stages side-by-side
+                session_log.log_chunk(
+                    seq=seq,
+                    stt=src_text,
+                    translation=tgt_text,
+                    refined=refined_text if refined_text != tgt_text else None,
+                    tts_text=refined_text,
+                    latency_sec=latency,
+                    source_lang=src_lang,
+                    target_lang=tgt_lang,
+                )
+
                 entry = {
                     "seq": seq,
                     "source": src_text,
-                    "translated": tgt_text,
+                    "translated": refined_text,
+                    "raw_translation": tgt_text if tgt_text != refined_text else None,
                     "source_lang": src_lang,
                     "target_lang": tgt_lang,
                     "latency": round(latency, 1),
                     "timestamp": time.time(),
                     "ukrainian": src_text,
-                    "english": tgt_text,
+                    "english": refined_text,
                 }
                 state.transcript.append(entry)
 
@@ -1334,7 +1405,7 @@ async def _run_live_pipeline():
                 # TTS — stream chunks into our slot
                 # Playback worker will drain this slot when it's our turn
                 tts_started = False
-                async for audio_chunk in synthesizer.synthesize_stream(tgt_text):
+                async for audio_chunk in synthesizer.synthesize_stream(refined_text):
                     if not tts_started:
                         tts_time_to_first = time.time() - t0 - latency
                         logger.info("[Chunk %d] TTS first audio in %.2fs", seq, tts_time_to_first)
@@ -1484,6 +1555,10 @@ async def _run_live_pipeline():
         state.stats["total_runtime"] = time.time() - state.start_time
         state.live_pipeline = None
         state.live_task = None
+        try:
+            session_log.finish()
+        except Exception:
+            pass
         logger.info("Live pipeline fully stopped and cleaned up")
 
 
@@ -1569,6 +1644,70 @@ async def api_health(request):
     return web.json_response({"healthy": all_ok, "checks": checks})
 
 
+# ── Session Logs API ────────────────────────────────────────────
+
+async def api_sessions(request):
+    """List recent session logs."""
+    from src.session_logger import list_sessions
+    limit = int(request.query.get("limit", "50"))
+    return web.json_response({"sessions": list_sessions(limit=limit)})
+
+
+async def api_session_detail(request):
+    """Get a full session log by ID."""
+    from src.session_logger import get_session
+    session_id = request.match_info["session_id"]
+    data = get_session(session_id)
+    if data is None:
+        return web.json_response({"error": "Session not found"}, status=404)
+    return web.json_response(data)
+
+
+async def api_session_export(request):
+    """Export a session log as a downloadable text file (side-by-side format)."""
+    from src.session_logger import get_session
+    session_id = request.match_info["session_id"]
+    data = get_session(session_id)
+    if data is None:
+        return web.json_response({"error": "Session not found"}, status=404)
+
+    lines = []
+    lines.append(f"Session: {data['session_id']}")
+    lines.append(f"Mode: {data['mode']}")
+    lines.append(f"Started: {data['started_at']}")
+    lines.append(f"Ended: {data.get('ended_at', 'in progress')}")
+    cfg = data.get("config", {})
+    lines.append(f"Languages: {cfg.get('source_language', '?')} → {cfg.get('target_language', '?')}")
+    lines.append("=" * 80)
+    lines.append("")
+
+    for chunk in data.get("chunks", []):
+        lines.append(f"--- Chunk #{chunk['seq']} ({chunk.get('latency_sec', 0)}s) ---")
+        lines.append(f"  STT:         {chunk.get('stt', '')}")
+        lines.append(f"  Translation: {chunk.get('translation', '')}")
+        if chunk.get("refined"):
+            lines.append(f"  Refined:     {chunk['refined']}")
+        lines.append(f"  TTS Text:    {chunk.get('tts_text', '')}")
+        lines.append("")
+
+    text = "\n".join(lines)
+    return web.Response(
+        text=text,
+        content_type="text/plain",
+        headers={
+            "Content-Disposition": f'attachment; filename="session_{session_id}.txt"',
+        },
+    )
+
+
+async def session_logs_page(request):
+    """Serve the session logs viewer page."""
+    html_path = Path(__file__).parent / "logs.html"
+    if not html_path.exists():
+        return web.Response(text="Session logs page not found", status=404)
+    return web.FileResponse(html_path)
+
+
 # ── WebSocket ───────────────────────────────────────────────────
 
 async def websocket_handler(request):
@@ -1652,6 +1791,11 @@ def create_app():
     app.router.add_post("/api/stop-live", api_stop_live)
     # Health check
     app.router.add_get("/api/health", api_health)
+    # Session logs
+    app.router.add_get("/logs", session_logs_page)
+    app.router.add_get("/api/sessions", api_sessions)
+    app.router.add_get("/api/sessions/{session_id}", api_session_detail)
+    app.router.add_get("/api/sessions/{session_id}/export", api_session_export)
     # Static assets
     static_path = Path(__file__).parent / "static"
     if static_path.exists():

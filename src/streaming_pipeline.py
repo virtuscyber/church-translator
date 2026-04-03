@@ -92,7 +92,9 @@ class StreamingPipeline:
 
         # Processing components
         self.transcriber = Transcriber(
+            provider=config.transcription.provider,
             api_key=config.openai_api_key,
+            elevenlabs_api_key=config.elevenlabs_api_key,
             model=config.transcription.model,
             language=config.transcription.language,
         )
@@ -113,6 +115,7 @@ class StreamingPipeline:
             elevenlabs_similarity=config.synthesis.elevenlabs.similarity_boost,
             openai_model=config.synthesis.openai.model,
             openai_voice=config.synthesis.openai.voice,
+            speed=config.synthesis.speed,
         )
         self._output_mode = config.output.mode
         self.playback = None

@@ -48,7 +48,9 @@ class TranslationPipeline:
             logger.info("Using fixed-duration chunking (%.1fs)", config.audio.chunk_duration_sec)
 
         self.transcriber = Transcriber(
+            provider=config.transcription.provider,
             api_key=config.openai_api_key,
+            elevenlabs_api_key=config.elevenlabs_api_key,
             model=config.transcription.model,
             language=config.transcription.language,
         )
@@ -71,6 +73,7 @@ class TranslationPipeline:
             elevenlabs_similarity=config.synthesis.elevenlabs.similarity_boost,
             openai_model=config.synthesis.openai.model,
             openai_voice=config.synthesis.openai.voice,
+            speed=config.synthesis.speed,
         )
 
         # Output at 24kHz for ElevenLabs PCM, 24kHz for OpenAI PCM
