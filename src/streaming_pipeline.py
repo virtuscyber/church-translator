@@ -95,6 +95,11 @@ class StreamingPipeline:
             api_key=config.openai_api_key,
             model=config.transcription.model,
             language=config.transcription.language,
+            temperature=config.transcription.temperature,
+            gate_silence=config.transcription.gate_silence,
+            silence_peak=config.transcription.silence_peak,
+            min_duration_sec=config.transcription.min_duration_sec,
+            filter_hallucinations=config.transcription.filter_hallucinations,
         )
         self.translator = Translator(
             api_key=config.openai_api_key,
@@ -102,6 +107,7 @@ class StreamingPipeline:
             model=config.translation.model,
             temperature=config.translation.temperature,
             context_sentences=config.pipeline.context_sentences,
+            filter_hallucinations=config.translation.filter_hallucinations,
         )
         self.synthesizer = Synthesizer(
             provider=config.synthesis.provider,
@@ -412,6 +418,11 @@ class StreamingFileTest:
             api_key=config.openai_api_key,
             model=config.transcription.model,
             language=config.transcription.language,
+            temperature=config.transcription.temperature,
+            gate_silence=config.transcription.gate_silence,
+            silence_peak=config.transcription.silence_peak,
+            min_duration_sec=config.transcription.min_duration_sec,
+            filter_hallucinations=config.transcription.filter_hallucinations,
         )
         self.translator = Translator(
             api_key=config.openai_api_key,
@@ -419,6 +430,7 @@ class StreamingFileTest:
             model=config.translation.model,
             temperature=config.translation.temperature,
             context_sentences=config.pipeline.context_sentences,
+            filter_hallucinations=config.translation.filter_hallucinations,
         )
         self.synthesizer = Synthesizer(
             provider=config.synthesis.provider,

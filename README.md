@@ -209,6 +209,25 @@ Edit `config.yaml`:
 | `translation.model` | gpt-4o | Translation model |
 | `synthesis.provider` | elevenlabs | `"elevenlabs"` or `"openai"` |
 
+### Reliability / Anti-Hallucination
+
+Speech-to-text models invent confident text when fed silence, noise, or music
+("thank you for watching", subtitle credits, looping phrases). These guards
+suppress that so phantom sentences never get spoken aloud:
+
+| Setting | Default | Description |
+|---------|---------|-------------|
+| `transcription.temperature` | 0.0 | Deterministic STT; lowest hallucination |
+| `transcription.gate_silence` | true | Skip near-silent chunks before STT (the biggest lever) |
+| `transcription.silence_peak` | 0.008 | Peak amplitude (0–1) below which a chunk is treated as silence. Lower it if quiet speech is being dropped |
+| `transcription.min_duration_sec` | 0.4 | Drop chunks shorter than this |
+| `transcription.filter_hallucinations` | true | Drop known artifacts and repetition loops (STT **and** translation) |
+| `translation.temperature` | 0.0 | Faithful, deterministic translation |
+| `translation.filter_hallucinations` | true | Reject junk input and hallucinated output; keep it out of the context window |
+
+If legitimate quiet speech is being skipped, lower `silence_peak` (e.g. `0.004`)
+or set `gate_silence: false`.
+
 ### Output
 
 | Setting | Default | Description |
@@ -238,12 +257,14 @@ pipeline:
 
 ## Biblical Language
 
-The translation prompt ensures appropriate vocabulary for church services:
-- "foolish" not "stupid"
-- "brethren" not "guys"
-- "transgression" not "mistake"
-- "congregation" not "crowd"
-- Scripture references preserved exactly
+The translation prompt is **fidelity-first**: it translates only what is
+actually said and never invents, completes, or embellishes content. Reverent,
+liturgical vocabulary is applied only where it fits naturally and does not
+change the meaning:
+- "brethren" for an address to the congregation
+- "Scripture" / "the Word", "the Lord", "grace", "mercy", "repentance"
+- Scripture references and proper nouns preserved exactly
+- Empty output when the audio contains no real speech
 
 See `prompts/biblical_translator.txt` to customize the translation style.
 
@@ -297,7 +318,7 @@ source venv/bin/activate
 python -m pytest tests/ -v
 ```
 
-Tests cover imports, config, dashboard API, VAD pipeline, audio device handling, WebSocket error handling, launcher scripts, and AES67 output.
+Tests cover imports, config, dashboard API, VAD pipeline, anti-hallucination filters (silence gating, artifact and repetition-loop detection), audio device handling, WebSocket error handling, launcher scripts, and AES67 output.
 
 ---
 

@@ -880,6 +880,11 @@ async def _run_file_test(file_path: str):
             api_key=config.openai_api_key,
             model=config.transcription.model,
             language=src_lang,
+            temperature=config.transcription.temperature,
+            gate_silence=config.transcription.gate_silence,
+            silence_peak=config.transcription.silence_peak,
+            min_duration_sec=config.transcription.min_duration_sec,
+            filter_hallucinations=config.transcription.filter_hallucinations,
         )
 
         # Build system prompt with language and custom vocabulary
@@ -893,6 +898,7 @@ async def _run_file_test(file_path: str):
             model=config.translation.model,
             temperature=config.translation.temperature,
             context_sentences=config.pipeline.context_sentences,
+            filter_hallucinations=config.translation.filter_hallucinations,
         )
 
         with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
@@ -1143,6 +1149,11 @@ async def _run_live_pipeline():
             api_key=config.openai_api_key,
             model=config.transcription.model,
             language=src_lang,
+            temperature=config.transcription.temperature,
+            gate_silence=config.transcription.gate_silence,
+            silence_peak=config.transcription.silence_peak,
+            min_duration_sec=config.transcription.min_duration_sec,
+            filter_hallucinations=config.transcription.filter_hallucinations,
         )
 
         system_prompt = config.translation.system_prompt
@@ -1155,6 +1166,7 @@ async def _run_live_pipeline():
             model=config.translation.model,
             temperature=config.translation.temperature,
             context_sentences=config.pipeline.context_sentences,
+            filter_hallucinations=config.translation.filter_hallucinations,
         )
 
         synthesizer = Synthesizer(
