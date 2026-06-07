@@ -796,7 +796,7 @@ async def api_save_config(request):
     """Save device/language config."""
     data = await request.json()
     # Only allow safe keys
-    allowed = {"input_device", "output_device", "source_language", "target_language", "custom_vocabulary", "elevenlabs_voice_id", "stt_model", "translation_model", "tts_model", "preferred_input_fingerprint", "preferred_output_fingerprint"} | _TUNING_KEYS | _AES67_KEYS
+    allowed = {"input_device", "output_device", "source_language", "target_language", "custom_vocabulary", "elevenlabs_voice_id", "stt_model", "stt_provider", "translation_model", "tts_model", "preferred_input_fingerprint", "preferred_output_fingerprint"} | _TUNING_KEYS | _AES67_KEYS
     filtered = {k: v for k, v in _coerce_tuning(data).items() if k in allowed}
     save_config(filtered)
     return web.json_response({"ok": True})
@@ -812,6 +812,7 @@ async def api_languages(request):
 _HOT_APPLY_KEYS = {
     "source_language", "target_language", "custom_vocabulary",
     "elevenlabs_voice_id", "stt_model", "translation_model", "tts_model",
+    "stt_provider",
 }
 _DEVICE_KEYS = {"input_device", "output_device"}
 
@@ -821,6 +822,8 @@ _TUNING_KEYS = {
     # transcription quality
     "gate_silence", "silence_peak", "min_duration_sec", "filter_hallucinations",
     "stt_temperature", "translation_temperature",
+    # synthesis
+    "tts_speed",
     # reliability
     "api_timeout", "max_retries", "mic_watchdog_sec",
     # VAD / chunking
@@ -840,6 +843,8 @@ _TUNING_COERCE = {
     "min_duration_sec": lambda v: max(0.0, min(5.0, float(v))),
     "stt_temperature": lambda v: max(0.0, min(1.0, float(v))),
     "translation_temperature": lambda v: max(0.0, min(1.0, float(v))),
+    # ElevenLabs supports ~0.7-1.2; clamp to that safe shared range.
+    "tts_speed": lambda v: max(0.7, min(1.2, float(v))),
     "api_timeout": lambda v: max(5.0, min(120.0, float(v))),
     "max_retries": lambda v: max(0, min(6, int(v))),
     "mic_watchdog_sec": lambda v: max(2.0, min(60.0, float(v))),
@@ -876,6 +881,8 @@ def _effective_tuning() -> dict:
         "filter_hallucinations": cfg.transcription.filter_hallucinations,
         "stt_temperature": cfg.transcription.temperature,
         "translation_temperature": cfg.translation.temperature,
+        "tts_speed": cfg.synthesis.speed,
+        "stt_provider": cfg.transcription.provider,
         "api_timeout": 30.0,
         "max_retries": 2,
         "mic_watchdog_sec": 6.0,
@@ -890,7 +897,7 @@ def _effective_tuning() -> dict:
         "aes67_ttl": cfg.output.ttl,
     }
     saved = load_saved_config()
-    for key in _TUNING_KEYS | _AES67_KEYS:
+    for key in _TUNING_KEYS | _AES67_KEYS | {"stt_provider"}:
         if key in saved and saved[key] is not None:
             defaults[key] = saved[key]
     return defaults
@@ -907,6 +914,9 @@ def _apply_to_live_components(data: dict) -> list[str]:
     if "stt_model" in data and transcriber is not None:
         transcriber.model = data["stt_model"]
         applied.append("STT model")
+    if "stt_provider" in data and transcriber is not None:
+        transcriber.provider = data["stt_provider"]
+        applied.append("STT provider")
     if "source_language" in data and transcriber is not None:
         from src.transcriber import stt_anchor_prompt
         code = str(data["source_language"]).strip().lower()
@@ -967,6 +977,9 @@ def _apply_tuning_to_live(data: dict) -> list[str]:
     if "translation_temperature" in data and translator is not None:
         translator.temperature = data["translation_temperature"]
         applied.append("translation temperature")
+    if "tts_speed" in data and synthesizer is not None:
+        synthesizer.speed = data["tts_speed"]
+        applied.append("TTS speed")
     if "filter_hallucinations" in data:
         if transcriber is not None:
             transcriber.filter_hallucinations = data["filter_hallucinations"]
@@ -1550,10 +1563,14 @@ async def _run_live_pipeline():
         saved_tts_model = saved.get("tts_model")
         if saved_tts_model:
             config.synthesis.elevenlabs.model = saved_tts_model
+        saved_stt_provider = saved.get("stt_provider")
+        if saved_stt_provider:
+            config.transcription.provider = saved_stt_provider
 
         # Apply saved live-tuning overrides (quality / VAD / reliability / AES67)
         # onto the config so the components below pick them up at construction.
         tune = _effective_tuning()
+        config.synthesis.speed = float(tune["tts_speed"])
         config.transcription.gate_silence = bool(tune["gate_silence"])
         config.transcription.silence_peak = float(tune["silence_peak"])
         config.transcription.min_duration_sec = float(tune["min_duration_sec"])
@@ -1598,6 +1615,9 @@ async def _run_live_pipeline():
             filter_hallucinations=config.transcription.filter_hallucinations,
             timeout=api_timeout,
             max_retries=max_retries,
+            provider=config.transcription.provider,
+            elevenlabs_api_key=config.elevenlabs_api_key,
+            elevenlabs_model=config.transcription.elevenlabs_model,
         )
 
         system_prompt = _build_translation_prompt(config.translation.system_prompt, custom_vocab)
@@ -1627,6 +1647,7 @@ async def _run_live_pipeline():
             openai_voice=config.synthesis.openai.voice,
             timeout=api_timeout,
             max_retries=max_retries,
+            speed=config.synthesis.speed,
         )
 
         playback = AudioPlayback(
@@ -1663,6 +1684,7 @@ async def _run_live_pipeline():
             "custom_vocabulary": custom_vocab,
             "elevenlabs_voice_id": saved.get("elevenlabs_voice_id"),
             "stt_model": config.transcription.model,
+            "stt_provider": config.transcription.provider,
             "translation_model": config.translation.model,
             "tts_model": config.synthesis.elevenlabs.model,
             # AES67 snapshot — lets api_apply skip a needless sender restart

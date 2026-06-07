@@ -22,7 +22,10 @@ class AudioConfig:
 
 @dataclass
 class TranscriptionConfig:
-    model: str = "gpt-4o-transcribe"
+    provider: str = "elevenlabs"      # "elevenlabs" (Scribe v2 — best for Ukrainian)
+                                       #   or "openai" (gpt-4o-transcribe)
+    model: str = "gpt-4o-transcribe"  # OpenAI STT model
+    elevenlabs_model: str = "scribe_v2"  # ElevenLabs STT model id
     language: str = "uk"
     temperature: float = 0.0          # 0 = deterministic, least hallucination
     gate_silence: bool = True         # Skip near-silent chunks before STT
@@ -50,7 +53,9 @@ class TranslationConfig:
 
 @dataclass
 class ElevenLabsConfig:
-    model: str = "eleven_turbo_v2_5"
+    # Flash v2.5 is the lowest-latency model (~75ms) and recommended for all
+    # real-time use; eleven_v3 is higher quality but too slow for live.
+    model: str = "eleven_flash_v2_5"
     voice_id: str = "pNInz6obpgDQGcFmaJgB"
     stability: float = 0.7
     similarity_boost: float = 0.8
@@ -65,6 +70,7 @@ class OpenAITTSConfig:
 @dataclass
 class SynthesisConfig:
     provider: str = "elevenlabs"
+    speed: float = 1.0  # Playback speed. ElevenLabs ~0.7-1.2, OpenAI 0.25-4.0.
     elevenlabs: ElevenLabsConfig = field(default_factory=ElevenLabsConfig)
     openai: OpenAITTSConfig = field(default_factory=OpenAITTSConfig)
 
@@ -147,6 +153,7 @@ def load_config(config_path: str = "config.yaml") -> Config:
         if "synthesis" in raw:
             s = raw["synthesis"]
             cfg.synthesis.provider = s.get("provider", cfg.synthesis.provider)
+            cfg.synthesis.speed = s.get("speed", cfg.synthesis.speed)
             if "elevenlabs" in s:
                 for k, v in s["elevenlabs"].items():
                     if hasattr(cfg.synthesis.elevenlabs, k):
