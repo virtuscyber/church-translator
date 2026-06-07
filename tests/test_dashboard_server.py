@@ -739,3 +739,53 @@ def test_apply_stt_provider_hot_swap():
         assert "STT provider" in applied
     finally:
         server.state.live_transcriber = None
+
+
+# ── Deepgram API key + per-provider STT model ─────────────────────────
+
+@pytest.mark.asyncio
+async def test_setup_save_writes_deepgram_key(monkeypatch, tmp_path):
+    import os
+    from dashboard import server
+
+    monkeypatch.setattr(server, "PROJECT_ROOT", tmp_path)
+    monkeypatch.delenv("DEEPGRAM_API_KEY", raising=False)
+    try:
+        resp = await server.api_setup_save(
+            DummyRequest("/api/setup/save", data={"deepgram_api_key": "dg-123"})
+        )
+        assert decode_json_response(resp) == {"ok": True}
+        assert "DEEPGRAM_API_KEY=dg-123" in (tmp_path / ".env").read_text()
+        assert os.environ["DEEPGRAM_API_KEY"] == "dg-123"
+
+        status = await server.api_setup_status(DummyRequest("/api/setup/status"))
+        assert decode_json_response(status)["has_deepgram"] is True
+    finally:
+        os.environ.pop("DEEPGRAM_API_KEY", None)
+
+
+@pytest.mark.asyncio
+async def test_tuning_exposes_per_provider_stt_models():
+    from dashboard import server
+    payload = decode_json_response(await server.api_tuning(DummyRequest("/api/tuning")))
+    assert "deepgram_model" in payload and "elevenlabs_model" in payload
+
+
+def test_apply_deepgram_and_elevenlabs_model_hot_swap():
+    from dashboard import server
+
+    class _T:
+        def __init__(self):
+            self.deepgram_model = "nova-3"
+            self.elevenlabs_model = "scribe_v2"
+
+    t = _T()
+    server.state.live_transcriber = t
+    try:
+        applied = server._apply_to_live_components({
+            "deepgram_model": "nova-2", "elevenlabs_model": "scribe_v2",
+        })
+        assert t.deepgram_model == "nova-2"
+        assert "Deepgram model" in applied and "ElevenLabs STT model" in applied
+    finally:
+        server.state.live_transcriber = None
