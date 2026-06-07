@@ -130,3 +130,117 @@ async def test_stop_unblocks_and_clears_running():
     await t.stop()
     assert t._running is False
     assert t._audio_q.qsize() == 1  # sentinel to wake the sender
+
+
+# ── ElevenLabs Scribe v2 Realtime ─────────────────────────────────────
+
+def _make_el(**kw):
+    from src.streaming_stt import ElevenLabsStreamingTranscriber
+    finals, interims = [], []
+    t = ElevenLabsStreamingTranscriber("k", on_interim=interims.append, on_final=finals.append, **kw)
+    return t, finals, interims
+
+
+def test_elevenlabs_partial_and_committed():
+    t, finals, interims = _make_el()
+    t._handle({"message_type": "partial_transcript", "text": "слава"})
+    assert interims == ["слава"] and finals == []
+    t._handle({"message_type": "final_transcript", "text": "слава богу"})
+    assert finals == ["слава богу"]
+
+
+def test_elevenlabs_accepts_alternate_committed_names():
+    for mtype in ("committed_transcript", "transcript", "committed"):
+        t, finals, _ = _make_el()
+        t._handle({"message_type": mtype, "text": "амінь"})
+        assert finals == ["амінь"], mtype
+
+
+def test_elevenlabs_url_and_headers():
+    t, _, _ = _make_el(model="scribe_v2_realtime", language="uk")
+    url = t._url()
+    assert url.startswith("wss://api.elevenlabs.io/v1/speech-to-text/realtime?")
+    assert "model_id=scribe_v2_realtime" in url and "language_code=uk" in url
+    assert t._headers()["xi-api-key"] == "k"
+
+
+@pytest.mark.asyncio
+async def test_elevenlabs_send_audio_is_base64_json():
+    t, _, _ = _make_el(sample_rate=16000)
+    sent = {}
+
+    class WS:
+        async def send_str(self, s):
+            sent.update(json.loads(s))
+
+    await t._send_audio(WS(), b"\x01\x02\x03\x04")
+    assert sent["message_type"] == "input_audio_chunk"
+    assert sent["sample_rate"] == 16000
+    import base64
+    assert base64.b64decode(sent["audio_base_64"]) == b"\x01\x02\x03\x04"
+
+
+# ── OpenAI Realtime (gpt-realtime-whisper) ────────────────────────────
+
+def _make_oai(**kw):
+    from src.streaming_stt import OpenAIRealtimeTranscriber
+    finals, interims = [], []
+    t = OpenAIRealtimeTranscriber("k", on_interim=interims.append, on_final=finals.append, **kw)
+    return t, finals, interims
+
+
+def test_openai_delta_accumulates_then_completes():
+    t, finals, interims = _make_oai()
+    t._handle({"type": "conversation.item.input_audio_transcription.delta", "delta": "слава"})
+    t._handle({"type": "conversation.item.input_audio_transcription.delta", "delta": " богу"})
+    assert interims[-1] == "слава богу"
+    t._handle({"type": "conversation.item.input_audio_transcription.completed", "transcript": "слава богу"})
+    assert finals == ["слава богу"]
+    assert t._delta_buffer == ""  # reset after completion
+
+
+def test_openai_error_sets_last_error():
+    t, _, _ = _make_oai()
+    t._handle({"type": "error", "error": {"message": "bad session"}})
+    assert t.last_error == "bad session"
+
+
+def test_openai_headers_and_url():
+    t, _, _ = _make_oai()
+    assert t._url() == "wss://api.openai.com/v1/realtime?intent=transcription"
+    h = t._headers()
+    assert h["Authorization"] == "Bearer k" and h["OpenAI-Beta"] == "realtime=v1"
+
+
+@pytest.mark.asyncio
+async def test_openai_resamples_to_24k_and_sends_append():
+    import numpy as np
+    t, _, _ = _make_oai(sample_rate=48000)
+    sent = {}
+
+    class WS:
+        async def send_str(self, s):
+            sent.update(json.loads(s))
+
+    # 48 samples @48k -> ~24 samples @24k
+    pcm = np.full(48, 1000, dtype="<i2").tobytes()
+    await t._send_audio(WS(), pcm)
+    assert sent["type"] == "input_audio_buffer.append"
+    import base64
+    out = np.frombuffer(base64.b64decode(sent["audio"]), dtype="<i2")
+    assert 22 <= len(out) <= 26  # halved sample count
+
+
+# ── Factory ───────────────────────────────────────────────────────────
+
+def test_factory_builds_each_engine():
+    from src.streaming_stt import (
+        make_streaming_transcriber, DeepgramStreamingTranscriber,
+        ElevenLabsStreamingTranscriber, OpenAIRealtimeTranscriber,
+    )
+    common = dict(api_key="k", language="uk", sample_rate=48000)
+    assert isinstance(make_streaming_transcriber("deepgram", model="nova-3", **common), DeepgramStreamingTranscriber)
+    assert isinstance(make_streaming_transcriber("elevenlabs", model="scribe_v2_realtime", **common), ElevenLabsStreamingTranscriber)
+    assert isinstance(make_streaming_transcriber("openai", model="gpt-realtime-whisper", **common), OpenAIRealtimeTranscriber)
+    with pytest.raises(ValueError):
+        make_streaming_transcriber("nope", model="x", **common)
