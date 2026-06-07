@@ -108,6 +108,9 @@ When nothing is running, **Apply** simply saves your settings for the next sessi
   automatically re-opens the device when it comes back.
 - **Export the transcript** any time with the **⬇ TXT** / **⬇ SRT** buttons on the
   transcript panel (handy for service records or captions).
+- **AES67/Dante output** is paced from an absolute clock so its 48 kHz RTP rate
+  stays drift-free over a long service. Because it's a software source, set the
+  receiver's latency/link-offset to **≥ 5 ms** to absorb scheduler jitter.
 
 ---
 
