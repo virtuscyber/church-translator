@@ -1049,6 +1049,26 @@
         </div>
     </div>
 
+    <!-- Live API Test (collapsible) -->
+    <div class="section collapsed" id="smokeSection">
+        <div class="section-head" onclick="toggleSection(this)">
+            <div class="head-left">
+                <h2>🔬 Live API Test</h2>
+                <span class="section-sub" id="smokeSummary">Verify your keys & models with one real round-trip each</span>
+            </div>
+            <span class="chev">▼</span>
+        </div>
+        <div class="section-body">
+            <div style="font-size:0.85em;color:var(--text-dim);margin-bottom:10px;">
+                Runs a single real call per configured provider — translation, text-to-speech, and
+                chunked + streaming speech-to-text. Providers without a key are skipped. Costs a few
+                cents. Stop live translation before running.
+            </div>
+            <button class="btn btn-primary" id="smokeRunBtn" onclick="runSmokeTest()">▶ Run live API test</button>
+            <div id="smokeResults" style="margin-top:12px;display:flex;flex-direction:column;gap:6px;"></div>
+        </div>
+    </div>
+
     <!-- Test with Audio File (collapsible) -->
     <div class="section collapsed" id="fileTestSection">
         <div class="section-head" onclick="toggleSection(this)">
@@ -2166,6 +2186,9 @@
             case 'info':
                 showToast('ℹ️ ' + msg.message);
                 break;
+            case 'smoke':
+                handleSmokeEvent(msg);
+                break;
         }
     }
 
@@ -2353,6 +2376,78 @@
             showToast('⬇ Transcript exported (' + fmt.toUpperCase() + ')');
         } catch (e) {
             showToast('❌ Export failed');
+        }
+    }
+
+    // ── Live API smoke test ───────────────────────
+    const SMOKE_ICON = {pass: '✅', fail: '❌', skip: '⚪', running: '⏳'};
+
+    function smokeRow(id) {
+        let row = document.getElementById('smokeRow_' + id);
+        if (!row) {
+            row = document.createElement('div');
+            row.id = 'smokeRow_' + id;
+            row.style.cssText = 'display:flex;align-items:center;gap:8px;font-size:0.9em;';
+            row.innerHTML = '<span class="smk-icon"></span><span class="smk-label" style="flex:1;"></span>'
+                          + '<span class="smk-detail" style="color:var(--text-dim);font-size:0.85em;text-align:right;max-width:55%;"></span>';
+            document.getElementById('smokeResults').appendChild(row);
+        }
+        return row;
+    }
+
+    function handleSmokeEvent(ev) {
+        if (ev.phase === 'begin') {
+            document.getElementById('smokeResults').innerHTML = '';
+            document.getElementById('smokeSummary').textContent = 'Running…';
+            return;
+        }
+        if (ev.phase === 'error') {
+            document.getElementById('smokeSummary').textContent = '⚠ ' + (ev.detail || 'error');
+            setSmokeRunning(false);
+            return;
+        }
+        if (ev.phase === 'done') {
+            document.getElementById('smokeSummary').textContent =
+                `${ev.passed} passed · ${ev.failed} failed · ${ev.skipped} skipped`;
+            setSmokeRunning(false);
+            showToast(ev.failed ? `❌ Live test: ${ev.failed} failed` : '✅ Live API test passed');
+            return;
+        }
+        const row = smokeRow(ev.id);
+        row.querySelector('.smk-label').textContent = ev.label;
+        if (ev.phase === 'start') {
+            row.querySelector('.smk-icon').textContent = SMOKE_ICON.running;
+            row.querySelector('.smk-detail').textContent = '';
+        } else if (ev.phase === 'result') {
+            row.querySelector('.smk-icon').textContent = SMOKE_ICON[ev.status] || '•';
+            const secs = ev.elapsed ? ` (${ev.elapsed}s)` : '';
+            row.querySelector('.smk-detail').textContent = (ev.detail || '') + secs;
+        }
+    }
+
+    function setSmokeRunning(running) {
+        const btn = document.getElementById('smokeRunBtn');
+        if (!btn) return;
+        btn.disabled = running;
+        btn.textContent = running ? '⏳ Running…' : '▶ Run live API test';
+    }
+
+    async function runSmokeTest() {
+        setSmokeRunning(true);
+        document.getElementById('smokeResults').innerHTML = '';
+        document.getElementById('smokeSummary').textContent = 'Starting…';
+        try {
+            const res = await apiFetch('/api/smoke/run', {method: 'POST'});
+            const data = await res.json().catch(() => ({}));
+            if (!res.ok || !data.ok) {
+                document.getElementById('smokeSummary').textContent = data.error || 'Could not start';
+                showToast('❌ ' + (data.error || 'Could not start live test'));
+                setSmokeRunning(false);
+            }
+            // Results stream in via 'smoke' WebSocket events.
+        } catch (e) {
+            showToast('❌ Failed to start live test');
+            setSmokeRunning(false);
         }
     }
 

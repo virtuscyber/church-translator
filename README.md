@@ -347,7 +347,21 @@ source venv/bin/activate
 python -m pytest tests/ -v
 ```
 
-Covers config, the dashboard API, the VAD pipeline, anti-hallucination filters, multi-provider STT + fallback, the three streaming engines, synthesis, live tuning, device recovery, transcript export, and AES67 output.
+Covers config, the dashboard API, the VAD pipeline, anti-hallucination filters, multi-provider STT + fallback, the three streaming engines, synthesis, live tuning, device recovery, transcript export, AES67 output, and end-to-end runs of the live pipeline (chunked + streaming). These are **hermetic** — they fake every provider, so they prove the plumbing without calling any real API.
+
+### Live API check (opt-in)
+
+To confirm your real keys, models, and the streaming sockets actually work before a
+service, run one real round-trip per configured provider — translation, text-to-speech,
+and chunked + streaming speech-to-text. Providers without a key are **skipped, never
+failed**, so it degrades gracefully. Costs a few cents.
+
+```bash
+python scripts/smoke_live.py
+```
+
+Or do it from the dashboard: **🔬 Live API Test → Run** shows each check live (✅ / ❌ / ⚪)
+with timing and the actual transcript/translation it got back. (Stop live translation first.)
 
 ---
 
