@@ -24,16 +24,20 @@ class Translator:
         temperature: float = 0.0,
         context_sentences: int = 2,
         filter_hallucinations: bool = True,
+        source_language: str = "Ukrainian",
+        target_language: str = "English",
     ):
         self.client = AsyncOpenAI(api_key=api_key)
         self.system_prompt = system_prompt
         self.model = model
         self.temperature = temperature
         self.filter_hallucinations = filter_hallucinations
+        self.source_language = source_language
+        self.target_language = target_language
         self._context: deque[str] = deque(maxlen=context_sentences)
 
     async def translate(self, ukrainian_text: str) -> Optional[str]:
-        """Translate Ukrainian text to English with biblical tone.
+        """Translate source-language text to the target language with biblical tone.
 
         Maintains a sliding window of previous translations for context
         continuity. Junk input is rejected up front, and the model's output is
@@ -74,7 +78,10 @@ class Translator:
                 {"role": "system", "content": self.system_prompt},
                 {
                     "role": "user",
-                    "content": f"Translate the following Ukrainian speech to English:{context_block}\n\n{clean_input}",
+                    "content": (
+                        f"Translate the following {self.source_language} speech to "
+                        f"{self.target_language}:{context_block}\n\n{clean_input}"
+                    ),
                 },
             ]
 

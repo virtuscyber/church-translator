@@ -364,3 +364,90 @@ async def test_websocket_rejects_invalid_json_without_crashing(monkeypatch):
     assert response is fake_ws
     assert fake_ws.sent[1] == {"type": "error", "message": "Invalid WebSocket payload"}
     assert server.state.connected_clients == []
+
+
+# ── Live-apply endpoint ───────────────────────────────────────────────
+
+class _FakeTranscriber:
+    def __init__(self):
+        self.model = "old-stt"
+        self.language = "uk"
+
+
+class _FakeTranslator:
+    def __init__(self):
+        self.model = "old-trans"
+        self.system_prompt = "base"
+        self.source_language = "Ukrainian"
+        self.target_language = "English"
+
+
+class _FakeSynth:
+    def __init__(self):
+        self.el_voice_id = "old-voice"
+        self.el_model = "old-tts"
+
+
+@pytest.mark.asyncio
+async def test_apply_persists_when_not_live(monkeypatch):
+    from dashboard import server
+
+    response = await server.api_apply(
+        DummyRequest("/api/apply", data={"translation_model": "gpt-4o-mini"})
+    )
+    payload = decode_json_response(response)
+    assert payload["ok"] is True
+    assert payload["live"] is False
+    assert payload["applied"] == []
+    assert server.load_saved_config()["translation_model"] == "gpt-4o-mini"
+
+
+@pytest.mark.asyncio
+async def test_apply_hot_swaps_running_components(monkeypatch):
+    from dashboard import server
+
+    tr, tl, sy = _FakeTranscriber(), _FakeTranslator(), _FakeSynth()
+    server.state.live_running = True
+    server.state.live_transcriber = tr
+    server.state.live_translator = tl
+    server.state.live_synthesizer = sy
+    server.state.live_settings = {"input_device": "1", "output_device": "2"}
+    monkeypatch.setattr(server, "broadcast", lambda msg: asyncio.sleep(0))
+
+    response = await server.api_apply(DummyRequest("/api/apply", data={
+        "stt_model": "new-stt",
+        "translation_model": "new-trans",
+        "tts_model": "new-tts",
+        "elevenlabs_voice_id": "new-voice",
+        "target_language": "es",
+    }))
+    payload = decode_json_response(response)
+
+    assert payload["live"] is True
+    assert payload["restart_needed"] is False
+    assert tr.model == "new-stt"
+    assert tl.model == "new-trans"
+    assert tl.target_language == "Spanish"
+    assert sy.el_voice_id == "new-voice"
+    assert sy.el_model == "new-tts"
+    assert set(payload["applied"]) >= {"STT model", "translation model", "TTS model", "voice", "target language"}
+
+
+@pytest.mark.asyncio
+async def test_apply_flags_restart_on_device_change(monkeypatch):
+    from dashboard import server
+
+    server.state.live_running = True
+    server.state.live_transcriber = _FakeTranscriber()
+    server.state.live_translator = _FakeTranslator()
+    server.state.live_synthesizer = _FakeSynth()
+    server.state.live_settings = {"input_device": "1", "output_device": "2"}
+    monkeypatch.setattr(server, "broadcast", lambda msg: asyncio.sleep(0))
+
+    response = await server.api_apply(
+        DummyRequest("/api/apply", data={"input_device": "5"})
+    )
+    payload = decode_json_response(response)
+
+    assert payload["restart_needed"] is True
+    assert "device" in payload["restart_reason"]

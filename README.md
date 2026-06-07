@@ -85,6 +85,20 @@ The browser opens to the dashboard at **http://localhost:8085**. On first run, a
 
 Click **Start Live Translation**, and the system begins listening, translating, and speaking in real time.
 
+### Adjusting settings live
+
+The transcript and live controls stay front-and-center; settings, system health, and
+the file-test tool are tucked into collapsible panels below. Change a setting and an
+**Unsaved changes** indicator appears — click **Apply Live** to push it into the
+running translation instantly with no audio gap:
+
+- **Hot-swapped live:** translation/STT/TTS model, ElevenLabs voice, custom vocabulary,
+  source/target language.
+- **Quick auto-restart:** changing the microphone or speaker briefly restarts the audio
+  stream (an open device can't be switched in place), then resumes automatically.
+
+When nothing is running, **Apply** simply saves your settings for the next session.
+
 ---
 
 ## Alternative: Docker

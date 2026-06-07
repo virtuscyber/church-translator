@@ -69,6 +69,21 @@ def save_config(data: dict):
     CONFIG_PATH.write_text(json.dumps(existing, indent=2), encoding="utf-8")
 
 
+_LANG_NAMES = {entry["code"]: entry["name"] for entry in SUPPORTED_LANGUAGES}
+
+
+def _language_name(code: str) -> str:
+    """Map an ISO code to a human-readable language name for prompts."""
+    return _LANG_NAMES.get(code, code)
+
+
+def _build_translation_prompt(base_prompt: str, custom_vocab: str) -> str:
+    """Combine the base biblical prompt with any custom vocabulary terms."""
+    if custom_vocab and custom_vocab.strip():
+        return base_prompt + f"\n\nCustom vocabulary and terms to use:\n{custom_vocab.strip()}"
+    return base_prompt
+
+
 # ── Auth & CORS Middleware ──────────────────────────────────────
 
 DASHBOARD_API_KEY = os.getenv("DASHBOARD_API_KEY", "")
@@ -149,6 +164,12 @@ class AppState:
         self.live_capture = None
         self.live_playback = None
         self.live_aes67 = None
+        # Live processing components — kept so settings can be hot-swapped
+        # into the running pipeline without a restart.
+        self.live_transcriber = None
+        self.live_translator = None
+        self.live_synthesizer = None
+        self.live_settings: dict = {}
         self.audio_monitor_lock = asyncio.Lock()
 
 state = AppState()
@@ -713,6 +734,108 @@ async def api_languages(request):
     return web.json_response({"languages": SUPPORTED_LANGUAGES})
 
 
+# Settings that can be hot-swapped into a running pipeline. Device changes are
+# intentionally excluded — an open audio stream can't switch devices in place.
+_HOT_APPLY_KEYS = {
+    "source_language", "target_language", "custom_vocabulary",
+    "elevenlabs_voice_id", "stt_model", "translation_model", "tts_model",
+}
+_DEVICE_KEYS = {"input_device", "output_device"}
+
+
+def _apply_to_live_components(data: dict) -> list[str]:
+    """Hot-swap settings into the running live components. Returns labels applied."""
+    applied: list[str] = []
+
+    transcriber = state.live_transcriber
+    translator = state.live_translator
+    synthesizer = state.live_synthesizer
+
+    if "stt_model" in data and transcriber is not None:
+        transcriber.model = data["stt_model"]
+        applied.append("STT model")
+    if "source_language" in data and transcriber is not None:
+        transcriber.language = data["source_language"]
+        if translator is not None:
+            translator.source_language = _language_name(data["source_language"])
+        applied.append("source language")
+
+    if translator is not None:
+        if "translation_model" in data:
+            translator.model = data["translation_model"]
+            applied.append("translation model")
+        if "target_language" in data:
+            translator.target_language = _language_name(data["target_language"])
+            applied.append("target language")
+        if "custom_vocabulary" in data:
+            from src.config import load_config
+            base = load_config().translation.system_prompt
+            translator.system_prompt = _build_translation_prompt(base, data["custom_vocabulary"])
+            applied.append("vocabulary")
+
+    if synthesizer is not None:
+        if "elevenlabs_voice_id" in data and data["elevenlabs_voice_id"]:
+            synthesizer.el_voice_id = data["elevenlabs_voice_id"]
+            applied.append("voice")
+        if "tts_model" in data:
+            synthesizer.el_model = data["tts_model"]
+            applied.append("TTS model")
+
+    return applied
+
+
+async def api_apply(request):
+    """Persist settings and hot-apply them to a running live pipeline.
+
+    All settings are saved to config.json. If a live session is running,
+    hot-swappable settings (models, voice, vocabulary, languages) take effect
+    immediately. Changing the microphone or speaker requires restarting the
+    audio stream, which the client triggers when ``restart_needed`` is true.
+    """
+    try:
+        data = await request.json()
+    except json.JSONDecodeError:
+        return web.json_response({"ok": False, "error": "Invalid JSON body"}, status=400)
+
+    allowed = _HOT_APPLY_KEYS | _DEVICE_KEYS | {
+        "preferred_input_fingerprint", "preferred_output_fingerprint",
+    }
+    filtered = {k: v for k, v in data.items() if k in allowed}
+    save_config(filtered)
+
+    applied: list[str] = []
+    restart_needed = False
+    restart_reason = ""
+
+    if state.live_running:
+        # Device changes can't be hot-swapped — flag for a quick restart.
+        prev = state.live_settings or {}
+        for key in _DEVICE_KEYS:
+            if key in filtered and str(filtered.get(key) or "") != str(prev.get(key) or ""):
+                restart_needed = True
+                restart_reason = "audio device changed"
+
+        hot = {k: v for k, v in filtered.items() if k in _HOT_APPLY_KEYS}
+        if hot:
+            applied = _apply_to_live_components(hot)
+            # Keep the snapshot current so the next diff is accurate.
+            state.live_settings.update(filtered)
+
+        if applied:
+            await broadcast({
+                "type": "info",
+                "message": "Applied live: " + ", ".join(applied),
+            })
+
+    return web.json_response({
+        "ok": True,
+        "live": state.live_running,
+        "applied": applied,
+        "restart_needed": restart_needed,
+        "restart_reason": restart_reason,
+    })
+
+
 # ── Voice Selection API ────────────────────────────────────────
 
 async def api_voices(request):
@@ -888,9 +1011,7 @@ async def _run_file_test(file_path: str):
         )
 
         # Build system prompt with language and custom vocabulary
-        system_prompt = config.translation.system_prompt
-        if custom_vocab:
-            system_prompt += f"\n\nCustom vocabulary and terms to use:\n{custom_vocab}"
+        system_prompt = _build_translation_prompt(config.translation.system_prompt, custom_vocab)
 
         translator = Translator(
             api_key=config.openai_api_key,
@@ -899,6 +1020,8 @@ async def _run_file_test(file_path: str):
             temperature=config.translation.temperature,
             context_sentences=config.pipeline.context_sentences,
             filter_hallucinations=config.translation.filter_hallucinations,
+            source_language=_language_name(src_lang),
+            target_language=_language_name(tgt_lang),
         )
 
         with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
@@ -1041,6 +1164,10 @@ async def _stop_live_pipeline(*, notify_clients: bool) -> None:
         state.live_task = None
 
     state.live_playback = None
+    state.live_transcriber = None
+    state.live_translator = None
+    state.live_synthesizer = None
+    state.live_settings = {}
     state.stats["status"] = "stopped"
     state.stats["total_runtime"] = time.time() - state.start_time if state.start_time else 0.0
 
@@ -1156,9 +1283,7 @@ async def _run_live_pipeline():
             filter_hallucinations=config.transcription.filter_hallucinations,
         )
 
-        system_prompt = config.translation.system_prompt
-        if custom_vocab:
-            system_prompt += f"\n\nCustom vocabulary and terms to use:\n{custom_vocab}"
+        system_prompt = _build_translation_prompt(config.translation.system_prompt, custom_vocab)
 
         translator = Translator(
             api_key=config.openai_api_key,
@@ -1167,6 +1292,8 @@ async def _run_live_pipeline():
             temperature=config.translation.temperature,
             context_sentences=config.pipeline.context_sentences,
             filter_hallucinations=config.translation.filter_hallucinations,
+            source_language=_language_name(src_lang),
+            target_language=_language_name(tgt_lang),
         )
 
         synthesizer = Synthesizer(
@@ -1199,10 +1326,25 @@ async def _run_live_pipeline():
             )
             aes67.start()
 
-        # Store references so api_stop_live can stop them
+        # Store references so api_stop_live can stop them and api_apply can
+        # hot-swap settings into the running pipeline.
         state.live_capture = capture
         state.live_playback = playback
         state.live_aes67 = aes67
+        state.live_transcriber = transcriber
+        state.live_translator = translator
+        state.live_synthesizer = synthesizer
+        state.live_settings = {
+            "input_device": saved.get("input_device"),
+            "output_device": saved.get("output_device"),
+            "source_language": src_lang,
+            "target_language": tgt_lang,
+            "custom_vocabulary": custom_vocab,
+            "elevenlabs_voice_id": saved.get("elevenlabs_voice_id"),
+            "stt_model": config.transcription.model,
+            "translation_model": config.translation.model,
+            "tts_model": config.synthesis.elevenlabs.model,
+        }
 
         await capture.start()
         await broadcast({"type": "info", "message": "Microphone active — listening for speech..."})
@@ -1490,6 +1632,10 @@ async def _run_live_pipeline():
             except Exception:
                 pass
         state.live_playback = None
+        state.live_transcriber = None
+        state.live_translator = None
+        state.live_synthesizer = None
+        state.live_settings = {}
         state.live_running = False
         state.running = False
         state.stats["status"] = "stopped"
@@ -1653,6 +1799,7 @@ def create_app():
     app.router.add_get("/api/settings", api_get_config)
     app.router.add_post("/api/settings", api_save_config)
     app.router.add_get("/api/languages", api_languages)
+    app.router.add_post("/api/apply", api_apply)
     app.router.add_get("/api/voices", api_voices)
     # Feature 3: Setup wizard
     app.router.add_get("/api/setup/status", api_setup_status)
