@@ -1,407 +1,360 @@
-# Church Live Translation
+<div align="center">
 
-Real-time multilingual translation for church services with biblical language styling. Audio flows from microphone through AI-powered speech recognition, translation, and synthesis — out to speakers, Dante network, or AES67 multicast.
+# ⛪ Church Live Translation
 
-## How It Works
+**Real-time, multilingual sermon translation with biblical language styling.**
 
-```
-Microphone → VAD Chunking → Whisper STT → GPT-4o Translation → Streaming TTS → Speakers / Dante / AES67
-```
+Microphone → AI speech recognition → translation → natural speech — out to local speakers, Dante, or AES67 multicast, all at once.
 
-1. **Captures** the speaker's audio from a microphone, Dante Via, or VBCable
-2. **Detects speech** using VAD (Voice Activity Detection) with smart sentence-boundary splitting
-3. **Transcribes** using OpenAI's `gpt-4o-transcribe` with speculative early transcription
-4. **Translates** to one or more target languages (GPT-4o + custom biblical prompt)
-5. **Speaks** the translation via streaming ElevenLabs or OpenAI TTS
-6. **Outputs** to local speakers, Dante Via, and/or AES67 multicast — simultaneously
+[![CI](https://github.com/virtuscyber/church-translator/actions/workflows/ci.yml/badge.svg)](https://github.com/virtuscyber/church-translator/actions/workflows/ci.yml)
+![Python](https://img.shields.io/badge/python-3.11%2B-blue)
+![Mode](https://img.shields.io/badge/mode-real--time-orange)
+![Output](https://img.shields.io/badge/output-Speakers%20%7C%20Dante%20%7C%20AES67-8a2be2)
+![License](https://img.shields.io/badge/license-MIT-green)
 
-### Supported Languages
-
-Ukrainian, Russian, English, Spanish, Portuguese, French, German, Korean, Mandarin Chinese, Arabic, Polish, Romanian, Italian, Japanese, Hindi — with multi-language simultaneous output.
+</div>
 
 ---
 
-## Performance
+## Contents
 
-| Metric | Value |
-|--------|-------|
-| **Typical end-to-end latency** | **5–8 seconds** |
-| **Worst case latency** | ~12 seconds |
-| **Estimated cost** | ~$2–3/hour |
+- [What it does](#-what-it-does)
+- [How it works](#-how-it-works)
+- [Capabilities](#-capabilities)
+- [Voice models](#-voice-models)
+- [Quick start](#-quick-start)
+- [Using the dashboard](#-using-the-dashboard)
+- [Audio output (Speakers / Dante / AES67)](#-audio-output)
+- [Configuration](#-configuration)
+- [Architecture](#-architecture)
+- [Testing](#-testing)
 
-### Optimization Pipeline
+---
 
-The system uses four layered optimizations to minimize latency:
+## ✨ What it does
 
-| Optimization | How It Works | Savings |
+A volunteer points a microphone at the preacher, opens a browser, and clicks **Start**. The congregation hears a natural-sounding translation in their language seconds later — through headsets, speakers, or a Dante/AES67 audio network.
+
+- 🎙️ **Any audio source** — USB mic, laptop mic, Dante Via, or VBCable
+- 🌍 **15 languages**, with simultaneous multi-language output
+- 📖 **Fidelity-first biblical styling** — translates only what is said, never invents
+- 🖥️ **Zero-terminal setup** — double-click a launcher, finish a browser wizard
+- 🔊 **Pro audio out** — local speakers, Dante Via, and drift-free AES67 multicast
+
+---
+
+## 🔄 How it works
+
+```
+                          ┌──────────────────────── two STT modes ────────────────────────┐
+  🎙️  Microphone ─────────┤                                                                │
+  (USB / Dante Via)       │   ⚡ Streaming   → persistent WebSocket, live interim words    │
+                          │   📦 Chunked     → VAD splits on pauses + speculative STT      │
+                          └───────────────────────────────┬───────────────────────────────┘
+                                                           ▼
+                                            🧠  Speech-to-text
+                                   (Scribe v2 · Deepgram Nova-3 · OpenAI)
+                                                           ▼
+                                       🌐  GPT-4o translation (+ biblical prompt)
+                                                           ▼
+                                        🔊  Streaming TTS (ElevenLabs Flash v2.5)
+                                                           ▼
+                                ┌──────────────────────────┴──────────────────────────┐
+                                ▼                          ▼                           ▼
+                          🔈 Local speakers          🎚️ Dante Via              📡 AES67 multicast
+```
+
+The default stack is a **full ElevenLabs pipeline**: Scribe v2 STT → GPT-4o translation → Flash v2.5 TTS — every stage swappable from the dashboard.
+
+### Supported languages
+
+Ukrainian · Russian · English · Spanish · Portuguese · French · German · Korean · Mandarin · Arabic · Polish · Romanian · Italian · Japanese · Hindi
+
+---
+
+## 🚀 Capabilities
+
+| Area | What you get |
+|---|---|
+| **Two STT modes** | **⚡ True streaming** (words appear as the preacher speaks) or **📦 chunked** (VAD + speculative STT). Switch per service. |
+| **3 streaming engines** | Deepgram Nova-3, ElevenLabs Scribe v2 Realtime, OpenAI `gpt-realtime-whisper` — behind one interface. |
+| **3 STT providers (chunked)** | ElevenLabs Scribe v2 (best Ukrainian accuracy), Deepgram Nova-3, OpenAI `gpt-4o-transcribe` — with automatic OpenAI fallback. |
+| **Anti-hallucination** | Silence gating, known-artifact filtering, repetition-loop detection, source-language anchoring — so dead air never becomes phantom text. |
+| **Live tuning** | Adjust quality, VAD, reliability, TTS speed, and AES67 settings **mid-service** with no restart. |
+| **Resilience** | Bounded retries with backoff, per-request timeouts, and sustained-failure alerts surfaced in the dashboard. |
+| **Mic-drop recovery** | A watchdog detects a stalled/unplugged device within seconds and auto-reconnects. |
+| **Transcript export** | One-click **TXT** / **SRT** download for service records or captions. |
+| **Pro audio output** | Local speakers, Dante Via, and a **drift-free AES67** RTP multicast (SAP/SDP announced). |
+| **Multi-language out** | One source → several target-language streams simultaneously. |
+
+---
+
+## 🎛️ Voice models
+
+The defaults track the best current real-time models, and every choice is a dropdown in the dashboard.
+
+| Stage | Default | Alternatives |
 |---|---|---|
-| **VAD smart chunking** | Splits audio on natural speech pauses instead of fixed intervals. Smart force-splitting at max duration finds the best silence gap instead of cutting mid-word. | Faster, higher quality chunks |
-| **Speculative STT** | Starts transcribing a preview snapshot while the speaker is still talking. If STT finishes before the VAD chunk completes, the transcription step is skipped entirely. | ~1–2s per chunk |
-| **Streaming TTS** | Plays audio chunks as they arrive from the TTS API (~300ms for first audio) instead of waiting for full synthesis. | ~2–3s per chunk |
-| **Concurrent processing** | Up to 3 chunks process STT + translate + TTS simultaneously, with an ordered playback system that ensures audio plays in the correct sequence. | Eliminates gaps between translations |
+| **Speech-to-text** | **ElevenLabs Scribe v2** (≤5% Ukrainian WER) | Deepgram Nova-3 · OpenAI `gpt-4o-transcribe` *(OpenAI is the auto-fallback)* |
+| **Streaming STT** | **Deepgram Nova-3** | ElevenLabs Scribe v2 Realtime · OpenAI `gpt-realtime-whisper` |
+| **Translation** | **GPT-4o** | `gpt-4o-mini` · `gpt-4.1-mini` · `gpt-4.1-nano` |
+| **Text-to-speech** | **ElevenLabs Flash v2.5** (~75 ms) | `eleven_v3` (most expressive) · Multilingual v2 · Turbo v2.5 · OpenAI `gpt-4o-mini-tts` |
 
-```
-Pipeline visualization (concurrent mode):
-
-Chunk 1: [STT][translate][TTS→slot1→🔊🔊🔊]
-Chunk 2:   [STT][translate][TTS→slot2→buffer] → [🔊🔊🔊]
-Chunk 3:       [STT][translate][TTS→slot3]        → [🔊🔊]
-                 ↑ all running simultaneously
-```
+> 💡 **⚡ True streaming** holds a socket open so the provider does the endpointing and **interim words show live**. Turn it off (or pick a chunked provider) to trade streaming latency for top accuracy. **TTS speed** is tunable live (~1.1–1.15 keeps the translation pacing the speaker).
 
 ---
 
-## Quick Start
+## ⚡ Quick start
 
-No Docker, no terminal commands. Any tech volunteer can run this.
+No Docker, no terminal. Any tech volunteer can run this.
 
-### 1. Download
+**1. Get the code**
 
 ```bash
 git clone https://github.com/virtuscyber/church-translator.git
 ```
 
-Or download and extract the ZIP from GitHub.
+**2. Launch**
 
-### 2. Launch
+| OS | Action |
+|---|---|
+| 🪟 Windows | double-click `start.bat` |
+| 🍎 macOS | double-click `start.command` |
+| 🐧 Linux | double-click `start.sh` (or `./start.sh`) |
 
-- **Windows:** Double-click `start.bat`
-- **macOS:** Double-click `start.command`
-- **Linux:** Double-click `start.sh` (or run `./start.sh`)
+The launcher checks Python 3.11+ and ffmpeg, creates a virtualenv, installs dependencies (first run only), starts the dashboard, and opens your browser.
 
-The launcher automatically:
-- Checks that Python 3.11+ and ffmpeg are installed
-- Creates a virtual environment and installs dependencies (first time only)
-- Starts the dashboard and opens your browser
+**3. Finish the wizard** at **http://localhost:8085**
 
-### 3. Setup Wizard
+- 🔑 **OpenAI API key** — required (translation + fallback)
+- 🔑 **ElevenLabs API key** — recommended (Scribe v2 STT + Flash TTS)
+- 🔑 **Deepgram API key** — optional (`DEEPGRAM_API_KEY`, for Deepgram STT/streaming)
+- 🌐 Source + target languages
 
-The browser opens to the dashboard at **http://localhost:8085**. On first run, a setup wizard walks you through:
-- Entering your **OpenAI API key** (required)
-- Entering your **ElevenLabs API key** (optional — falls back to OpenAI TTS)
-- Choosing source and target languages
+**4. Click _Start Live Translation_** — it begins listening, translating, and speaking in real time.
 
-### 4. Start Translating
+<details>
+<summary><b>Prerequisites (handled by the launcher / wizard)</b></summary>
 
-Click **Start Live Translation**, and the system begins listening, translating, and speaking in real time.
+- **Python 3.11+** — <https://www.python.org/downloads/>
+- **ffmpeg** — `brew install ffmpeg` · `sudo apt install ffmpeg` · [Windows build](https://ffmpeg.org/download.html)
+- **OpenAI API key** — <https://platform.openai.com/api-keys>
+- **ElevenLabs API key** *(optional)* — <https://elevenlabs.io/>
+- **Deepgram API key** *(optional)* — <https://deepgram.com/>
 
-### Adjusting settings live
+The dashboard's health panel tells you exactly what's missing and how to fix it.
 
-The transcript and live controls stay front-and-center; settings, system health, and
-the file-test tool are tucked into collapsible panels below. Change a setting and an
-**Unsaved changes** indicator appears — click **Apply Live** to push it into the
-running translation instantly with no audio gap:
+</details>
 
-- **Hot-swapped live:** translation/STT/TTS model, ElevenLabs voice, custom vocabulary,
-  source/target language.
-- **Quick auto-restart:** changing the microphone or speaker briefly restarts the audio
-  stream (an open device can't be switched in place), then resumes automatically.
+<details>
+<summary><b>Alternatives: Docker & one-line install</b></summary>
 
-When nothing is running, **Apply** simply saves your settings for the next session.
-
-### Voice models
-
-The defaults track the best current real-time models:
-
-- **Speech-to-text — ElevenLabs Scribe v2** (`transcription.provider: elevenlabs`). Best-in-class
-  Ukrainian accuracy (≤5% WER), which is the strongest fix for Ukrainian being mis-heard as
-  Polish/Russian. **Deepgram Nova-3** (`provider: deepgram`, set `DEEPGRAM_API_KEY`) and OpenAI
-  `gpt-4o-transcribe` are also selectable; OpenAI is the automatic fallback if the chosen provider
-  fails. The **Speech-to-Text Provider** dropdown switches this live.
-- **True streaming** — with **⚡ True streaming** enabled (`transcription.streaming: true`), a
-  streaming-capable provider holds a persistent WebSocket open and streams audio continuously
-  instead of waiting for VAD chunk boundaries. The provider does the endpointing; **interim words
-  appear live** on the dashboard and each finished utterance is translated and spoken as it
-  completes. Three engines plug into the same path:
-  - **Deepgram** Nova-3 (`provider: deepgram`)
-  - **ElevenLabs** Scribe v2 Realtime (`provider: elevenlabs`)
-  - **OpenAI** `gpt-realtime-whisper` (`provider: openai`)
-
-  When streaming is off (or the provider doesn't support it), the proven chunked path runs — so you
-  can trade streaming latency for top accuracy per service.
-- **Text-to-speech — ElevenLabs Flash v2.5** (~75 ms latency, recommended for all real-time use).
-  `eleven_v3` (most expressive, not real-time), Multilingual v2, and Turbo v2.5 are also selectable.
-- **TTS speed** is adjustable live under Advanced tuning (try ~1.1–1.15 so the translation keeps
-  pace with the speaker).
-
-> A full ElevenLabs stack — Scribe v2 STT → GPT translation → ElevenLabs TTS — is the default.
-> Set `transcription.provider`/`synthesis.provider` in `config.yaml`, or use the dashboard dropdowns.
-
-### Advanced live tuning
-
-Under **Settings → 🔧 Advanced tuning** you can adjust the quality, segmentation,
-reliability, and AES67 knobs while a service is running — changes take effect
-immediately (no restart):
-
-- **Transcription quality** — silence gate, silence threshold, min chunk duration,
-  hallucination filter, STT/translation temperature. Reach for these if you hear
-  phantom text on dead air or quiet speech getting dropped.
-- **Voice activity / chunking** — VAD aggressiveness and min/max/silence-split chunk
-  timing (bump aggressiveness in noisy or reverberant rooms).
-- **Reliability** — API timeout, retry count, and the mic-stall watchdog threshold.
-- **AES67/Dante output** — output mode, stream name, multicast address, port, TTL.
-  Saving these restarts and re-announces the RTP sender (only when they actually
-  change).
-
-### Reliability during a service
-
-- **API hiccups** (rate limits, brief network drops) are retried automatically with
-  backoff and per-request timeouts. A sustained failure (bad key, exhausted quota)
-  is surfaced in the dashboard instead of silently dropping audio.
-- **Microphone drop-outs** are detected within seconds — the dashboard alerts you and
-  automatically re-opens the device when it comes back.
-- **Export the transcript** any time with the **⬇ TXT** / **⬇ SRT** buttons on the
-  transcript panel (handy for service records or captions).
-- **AES67/Dante output** is paced from an absolute clock so its 48 kHz RTP rate
-  stays drift-free over a long service. Because it's a software source, set the
-  receiver's latency/link-offset to **≥ 5 ms** to absorb scheduler jitter.
-
----
-
-## Alternative: Docker
-
-> **Note:** Docker is for the dashboard and file-test workflow. Live microphone
-> capture does **not** work in a container without explicit audio-device passthrough
-> (`--device /dev/snd` plus a PulseAudio/ALSA bridge). For live translation, run
-> natively (see Quick Start).
+**Docker** (dashboard + file-test only — live mic needs native audio passthrough):
 
 ```bash
 git clone https://github.com/virtuscyber/church-translator.git
 cd church-translator
-docker compose up -d
+docker compose up -d           # → http://localhost:8085
+docker compose logs -f         # watch logs
+docker compose down            # stop
 ```
 
-Open **http://localhost:8085** in your browser. The setup wizard handles configuration.
-
-```bash
-docker compose logs -f          # Watch logs
-docker compose down             # Stop
-docker compose up -d --build    # Rebuild after updates
-```
-
----
-
-## One-Line Install Script
-
-For a native install on a fresh machine:
+**One-line native install** (macOS, Ubuntu/Debian, Fedora, Arch):
 
 ```bash
 curl -sL https://raw.githubusercontent.com/virtuscyber/church-translator/main/install.sh | bash
 ```
 
-Detects your OS (macOS, Ubuntu/Debian, Fedora, Arch), installs prerequisites, and sets everything up.
+</details>
 
 ---
 
-## Prerequisites
+## 🖥️ Using the dashboard
 
-- **Python 3.11+** — [Download](https://www.python.org/downloads/)
-- **ffmpeg** — for audio processing
-  - macOS: `brew install ffmpeg`
-  - Ubuntu/Debian: `sudo apt install ffmpeg`
-  - Windows: [Download](https://ffmpeg.org/download.html) and add to PATH
-- **OpenAI API key** — [Get one](https://platform.openai.com/api-keys)
-- **ElevenLabs API key** (optional) — [Get one](https://elevenlabs.io/)
+The live transcript and controls stay front-and-center; **Settings**, **System health**, and the **file-test** tool are tucked into collapsible panels.
 
-The dashboard shows a health check panel on load — it tells you exactly what's missing and how to fix it.
+- **Apply live** — change the model, voice, vocabulary, or language and push it into the running translation with **no audio gap**. Mic/speaker changes do a quick seamless restart.
+- **⚡ Live interim line** — in streaming mode, words appear greyed-in as they're recognized, then settle into the transcript.
+- **🔧 Advanced tuning** — silence gate & threshold, VAD aggressiveness, chunk timing, hallucination filter, temperatures, **TTS speed**, API timeout/retries, mic-watchdog, and AES67 output — all applied instantly.
+- **⬇ Export** — download the transcript as **TXT** or **SRT** at any time.
 
 ---
 
-## Audio Output Options
+## 🔊 Audio output
 
-### Local Speakers (Default)
+Set `output.mode` to `sounddevice`, `dante`, or `both`.
 
-Set `output.mode: "sounddevice"` in `config.yaml`. Audio plays through the system's default output device or a specified device.
+<details open>
+<summary><b>🔈 Local speakers</b> (default)</summary>
 
-### Dante Via (Recommended for Dante Networks)
+`output.mode: "sounddevice"` — plays through the system default or a chosen output device.
 
-The simplest way to get translation audio onto a Dante network:
+</details>
 
-1. Install **Dante Via** on the translation laptop
-2. Create a **Transmit** route in Dante Via
-3. Set the output device in `config.yaml` to the Dante Via virtual output:
+<details>
+<summary><b>🎚️ Dante Via</b> (simplest for Dante networks)</summary>
+
+1. Install **Dante Via** on the translation laptop and create a **Transmit** route.
+2. Point the output device at it:
    ```yaml
    output:
      mode: "sounddevice"
      output_device: "Dante Via Transmit"
    ```
-4. In **Dante Controller**, route the Dante Via device to your receivers (Williams Sound headsets, speakers, etc.)
+3. In **Dante Controller**, route the Dante Via device to your receivers (Williams Sound headsets, speakers, etc.).
 
-### AES67 Multicast (Direct, No Dante Via)
+</details>
 
-For direct AES67 output without Dante Via:
-
-1. Set output mode in `config.yaml`:
-   ```yaml
-   output:
-     mode: "both"          # "sounddevice", "dante", or "both"
-     stream_name: "Church Translation EN"
-     multicast_address: "239.69.0.1"
-     port: 5004
-     ttl: 32
-   ```
-2. The app broadcasts a continuous AES67 RTP multicast stream with SAP/SDP announcements
-3. In **Dante Controller**, enable AES67 mode and PTPv2 on the receiving device
-4. The stream appears automatically — route it to your outputs
-
-**Multi-language AES67:** Each target language gets its own multicast stream (`.1`, `.2`, `.3`...) with separate SAP announcements.
-
-**Troubleshooting AES67:**
-- Run `python scripts/diagnose_aes67.py` to verify multicast is working
-- Run `python scripts/diagnose_dante.py` for Dante network diagnostics
-- Check Windows Firewall — multicast UDP is commonly blocked
-- Ensure the translation laptop and Dante devices are on the same VLAN/subnet
-
----
-
-## Configuration
-
-Edit `config.yaml`:
-
-### Audio
-
-| Setting | Default | Description |
-|---------|---------|-------------|
-| `audio.input_device` | system default | Input device name or index |
-| `audio.output_device` | system default | Output device name or index |
-| `audio.sample_rate` | 48000 | Audio sample rate (Hz) |
-
-### Pipeline / VAD
-
-| Setting | Default | Description |
-|---------|---------|-------------|
-| `pipeline.use_vad` | true | Use voice activity detection (recommended) |
-| `pipeline.vad_aggressiveness` | 2 | Noise filtering 0–3 (2 = typical church, 3 = noisy) |
-| `pipeline.min_chunk_sec` | 2.0 | Minimum speech before emitting a chunk |
-| `pipeline.max_chunk_sec` | 8.0 | Force-split even during continuous speech |
-| `pipeline.silence_threshold_sec` | 0.6 | Silence duration to trigger chunk boundary |
-| `pipeline.context_sentences` | 2 | Previous sentences fed as translation context |
-
-### Models
-
-| Setting | Default | Description |
-|---------|---------|-------------|
-| `transcription.model` | gpt-4o-transcribe | OpenAI STT model |
-| `translation.model` | gpt-4o | Translation model |
-| `synthesis.provider` | elevenlabs | `"elevenlabs"` or `"openai"` |
-
-### Reliability / Anti-Hallucination
-
-Speech-to-text models invent confident text when fed silence, noise, or music
-("thank you for watching", subtitle credits, looping phrases). These guards
-suppress that so phantom sentences never get spoken aloud:
-
-| Setting | Default | Description |
-|---------|---------|-------------|
-| `transcription.temperature` | 0.0 | Deterministic STT; lowest hallucination |
-| `transcription.gate_silence` | true | Skip near-silent chunks before STT (the biggest lever) |
-| `transcription.silence_peak` | 0.008 | Peak amplitude (0–1) below which a chunk is treated as silence. Lower it if quiet speech is being dropped |
-| `transcription.min_duration_sec` | 0.4 | Drop chunks shorter than this |
-| `transcription.filter_hallucinations` | true | Drop known artifacts and repetition loops (STT **and** translation) |
-| `translation.temperature` | 0.0 | Faithful, deterministic translation |
-| `translation.filter_hallucinations` | true | Reject junk input and hallucinated output; keep it out of the context window |
-
-If legitimate quiet speech is being skipped, lower `silence_peak` (e.g. `0.004`)
-or set `gate_silence: false`.
-
-### Output
-
-| Setting | Default | Description |
-|---------|---------|-------------|
-| `output.mode` | sounddevice | `"sounddevice"`, `"dante"`, or `"both"` |
-| `output.stream_name` | Church Translation EN | AES67 stream name (visible in Dante Controller) |
-| `output.multicast_address` | 239.69.0.1 | AES67 multicast address |
-| `output.port` | 5004 | AES67 RTP port |
-
-### Tuning Latency vs Quality
+<details>
+<summary><b>📡 AES67 multicast</b> (direct, no Dante Via)</summary>
 
 ```yaml
-# Lower latency (faster but may split mid-sentence)
-pipeline:
-  min_chunk_sec: 1.5
-  max_chunk_sec: 5.0
-  silence_threshold_sec: 0.4
-
-# Higher quality (longer chunks = better translation context)
-pipeline:
-  min_chunk_sec: 3.0
-  max_chunk_sec: 10.0
-  silence_threshold_sec: 0.8
+output:
+  mode: "both"          # "sounddevice", "dante", or "both"
+  stream_name: "Church Translation EN"
+  multicast_address: "239.69.0.1"
+  port: 5004
+  ttl: 32
 ```
+
+The app broadcasts a continuous AES67 RTP stream with SAP/SDP announcements, **paced from an absolute clock so the 48 kHz rate stays drift-free** over a long service. In **Dante Controller**, enable AES67 + PTPv2 on the receiver and route the stream.
+
+> Because this is a software source, set the receiver's latency/link-offset to **≥ 5 ms** to absorb scheduler jitter. Multi-language output uses one multicast stream per language (`.1`, `.2`, …).
+
+**Troubleshooting:** `python scripts/diagnose_aes67.py` (multicast send/receive) · `python scripts/diagnose_dante.py` (Dante network) · check Windows Firewall (multicast UDP is often blocked) · keep all devices on the same VLAN/subnet.
+
+</details>
 
 ---
 
-## Biblical Language
+## ⚙️ Configuration
 
-The translation prompt is **fidelity-first**: it translates only what is
-actually said and never invents, completes, or embellishes content. Reverent,
-liturgical vocabulary is applied only where it fits naturally and does not
-change the meaning:
-- "brethren" for an address to the congregation
-- "Scripture" / "the Word", "the Lord", "grace", "mercy", "repentance"
-- Scripture references and proper nouns preserved exactly
-- Empty output when the audio contains no real speech
+Everything below lives in `config.yaml` (or the dashboard). Tables show the most useful knobs.
 
-See `prompts/biblical_translator.txt` to customize the translation style.
+<details>
+<summary><b>Speech-to-text & streaming</b></summary>
+
+| Setting | Default | Description |
+|---|---|---|
+| `transcription.provider` | `elevenlabs` | `elevenlabs` (Scribe v2) · `deepgram` (Nova-3) · `openai` |
+| `transcription.streaming` | `true` | True-streaming WebSocket path when the provider supports it |
+| `transcription.language` | `uk` | Source language (ISO 639-1) |
+| `transcription.elevenlabs_model` | `scribe_v2` | ElevenLabs chunked STT model |
+| `transcription.deepgram_model` | `nova-3` | Deepgram model |
+| `transcription.elevenlabs_realtime_model` | `scribe_v2_realtime` | ElevenLabs streaming model |
+| `transcription.openai_realtime_model` | `gpt-realtime-whisper` | OpenAI streaming model |
+| `transcription.model` | `gpt-4o-transcribe` | OpenAI chunked STT (and fallback) |
+
+</details>
+
+<details>
+<summary><b>Translation & synthesis</b></summary>
+
+| Setting | Default | Description |
+|---|---|---|
+| `translation.model` | `gpt-4o` | Translation model |
+| `translation.temperature` | `0.0` | Faithful, deterministic translation |
+| `synthesis.provider` | `elevenlabs` | `elevenlabs` or `openai` |
+| `synthesis.speed` | `1.0` | Playback speed (ElevenLabs ~0.7–1.2; try 1.1–1.15) |
+| `synthesis.elevenlabs.model` | `eleven_flash_v2_5` | TTS model |
+| `synthesis.elevenlabs.voice_id` | Adam | ElevenLabs voice |
+
+</details>
+
+<details>
+<summary><b>Pipeline / VAD (chunked mode)</b></summary>
+
+| Setting | Default | Description |
+|---|---|---|
+| `pipeline.vad_aggressiveness` | `2` | Noise filtering 0–3 (2 = typical church, 3 = noisy) |
+| `pipeline.min_chunk_sec` | `2.0` | Minimum speech before emitting a chunk |
+| `pipeline.max_chunk_sec` | `8.0` | Force-split during continuous speech |
+| `pipeline.silence_threshold_sec` | `0.6` | Silence that triggers a chunk boundary |
+| `pipeline.context_sentences` | `2` | Previous sentences fed as translation context |
+
+```yaml
+# Lower latency (may split mid-sentence)        # Higher quality (more context)
+pipeline:                                        pipeline:
+  min_chunk_sec: 1.5                               min_chunk_sec: 3.0
+  max_chunk_sec: 5.0                               max_chunk_sec: 10.0
+  silence_threshold_sec: 0.4                       silence_threshold_sec: 0.8
+```
+
+</details>
+
+<details>
+<summary><b>Anti-hallucination</b></summary>
+
+STT models invent confident text when fed silence, noise, or music ("thank you for watching", subtitle credits, looping phrases). These guards suppress that so phantom sentences are never spoken:
+
+| Setting | Default | Description |
+|---|---|---|
+| `transcription.gate_silence` | `true` | Skip near-silent chunks before STT (**biggest lever**) |
+| `transcription.silence_peak` | `0.008` | Peak (0–1) below which a chunk is "silence" — lower if quiet speech is dropped |
+| `transcription.min_duration_sec` | `0.4` | Drop chunks shorter than this |
+| `transcription.filter_hallucinations` | `true` | Drop known artifacts + repetition loops (STT **and** translation) |
+| `transcription.temperature` | `0.0` | Deterministic STT; lowest hallucination |
+
+</details>
 
 ---
 
-## Architecture
+## 🧩 Architecture
 
 ```
-┌─────────────┐    ┌─────────────┐    ┌─────────────┐    ┌─────────────┐    ┌──────────────┐
-│  Microphone  │───▶│  VAD Smart  │───▶│ Speculative │───▶│  GPT-4o     │───▶│  Streaming   │
-│  / Dante Via │    │  Chunking   │    │  STT        │    │  Translation │    │  TTS         │
-└─────────────┘    └─────────────┘    └─────────────┘    └─────────────┘    └──────┬───────┘
-                                                                                    │
-                   ┌────────────────────────────────────────────────────────────────┘
-                   │
-        ┌──────────┴──────────┐
-        │  Ordered Playback   │───▶ Local Speakers
-        │  (concurrent slots) │───▶ Dante Via
-        │                     │───▶ AES67 Multicast
-        └─────────────────────┘
+🎙️ Mic / Dante Via
+        │
+        ├── ⚡ Streaming  → streaming_stt.py (WebSocket) ──┐
+        └── 📦 Chunked    → vad_capture.py → vad_chunker.py┤
+                                                          ▼
+                              transcriber.py  (Scribe v2 / Deepgram / OpenAI, + fallback)
+                                                          ▼
+                              translator.py   (GPT-4o + biblical prompt, context window)
+                                                          ▼
+                              synthesizer.py  (streaming Flash v2.5 / OpenAI TTS)
+                                                          ▼
+                              ordered playback (concurrent slots, in-sequence audio)
+                                                          ▼
+              audio_playback.py 🔈     ·     aes67_output.py 📡 (drift-free RTP + SAP/SDP)
 ```
 
-### Key Components
+| Component | File | Role |
+|---|---|---|
+| **Streaming STT** | `src/streaming_stt.py` | WebSocket engines (Deepgram / ElevenLabs Realtime / OpenAI) behind one interface |
+| **VAD chunker** | `src/vad_chunker.py` | Energy VAD with adaptive noise floor + smart silence-gap splitting |
+| **VAD capture** | `src/vad_capture.py` | Async capture, preview snapshots, raw-PCM streaming tap, device watchdog |
+| **Transcriber** | `src/transcriber.py` | Multi-provider chunked STT with anti-hallucination + OpenAI fallback |
+| **Translator** | `src/translator.py` | GPT-4o translation with rolling context |
+| **Synthesizer** | `src/synthesizer.py` | Streaming/batch TTS (ElevenLabs + OpenAI) with retry/fallback |
+| **AES67 sender** | `src/aes67_output.py` | Drift-free RTP multicast with SAP/SDP announcements |
+| **Hallucination** | `src/hallucination.py` | Silence gate, artifact filter, repetition detection |
+| **Dashboard** | `dashboard/server.py` | Web UI, API, pipeline orchestration, live WebSocket updates |
 
-| Component | File | Description |
-|-----------|------|-------------|
-| **VAD Chunker** | `src/vad_chunker.py` | Energy-based VAD with adaptive noise floor, smart force-splitting at silence gaps |
-| **VAD Capture** | `src/vad_capture.py` | Async audio capture with preview snapshots for speculative STT |
-| **Transcriber** | `src/transcriber.py` | OpenAI Whisper STT wrapper |
-| **Translator** | `src/translator.py` | GPT-4o translation with context windowing |
-| **Synthesizer** | `src/synthesizer.py` | Streaming TTS via ElevenLabs or OpenAI (batch + stream modes) |
-| **AES67 Sender** | `src/aes67_output.py` | Continuous RTP multicast with SAP/SDP announcements |
-| **Audio Playback** | `src/audio_playback.py` | Local speaker output via sounddevice |
-| **Dashboard** | `dashboard/server.py` | Web UI, API, pipeline orchestration, WebSocket live updates |
-
-### Diagnostic Tools
-
-| Script | Description |
-|--------|-------------|
-| `scripts/diagnose_aes67.py` | Verify multicast send/receive, check firewall, inspect network interfaces |
-| `scripts/diagnose_dante.py` | Dante/AES67 network diagnostics |
-| `scripts/list_devices.py` | List available audio input/output devices |
-| `scripts/test_aes67.py` | Test AES67 stream output |
+**Diagnostics:** `scripts/diagnose_aes67.py` · `scripts/diagnose_dante.py` · `scripts/list_devices.py` · `scripts/test_aes67.py`
 
 ---
 
-## Testing
+## 📖 Biblical language
+
+The translation prompt is **fidelity-first**: it renders only what is actually said and never invents, completes, or embellishes. Reverent vocabulary is applied only where it fits naturally — "brethren", "Scripture"/"the Word", "the Lord", "grace", "mercy", "repentance" — with Scripture references and proper nouns preserved exactly, and empty output when there's no real speech. Customize it in [`prompts/biblical_translator.txt`](prompts/biblical_translator.txt).
+
+---
+
+## 🧪 Testing
 
 ```bash
 source venv/bin/activate
 python -m pytest tests/ -v
 ```
 
-Tests cover imports, config, dashboard API, VAD pipeline, anti-hallucination filters (silence gating, artifact and repetition-loop detection), audio device handling, WebSocket error handling, launcher scripts, and AES67 output.
+Covers config, the dashboard API, the VAD pipeline, anti-hallucination filters, multi-provider STT + fallback, the three streaming engines, synthesis, live tuning, device recovery, transcript export, and AES67 output.
 
 ---
 
-## License
-
-MIT
-
----
+<div align="center">
 
 **Developed by [Virtus Cybersecurity](https://virtuscyber.com) — Bogdan Salamakha**
+
+MIT License
+
+</div>
