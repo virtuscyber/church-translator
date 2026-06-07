@@ -54,6 +54,8 @@ def _build_sdp(
         f"a=ptime:{_AES67_PACKET_TIME_MS}\r\n"
         "a=sendonly\r\n"
         "a=ts-refclk:localmac\r\n"
+        "a=clock-domain:PTPv2 0\r\n"
+        "a=mediaclk:direct=0\r\n"
     )
 
 
@@ -312,53 +314,93 @@ class AES67Sender:
     def _continuous_stream_loop(self):
         """Send RTP packets continuously at 1ms intervals (runs in daemon thread).
 
-        When audio is in the buffer, sends real audio. Otherwise sends silence.
-        This keeps the AES67 stream alive so Dante Controller never drops it.
+        When audio is in the buffer, sends real audio; otherwise sends silence,
+        keeping the AES67 stream alive so receivers never drop it.
+
+        Pacing is pinned to an absolute wall-clock timeline rather than a
+        per-packet ``sleep(1ms)``. The OS scheduler can't honour a reliable 1ms
+        sleep, so instead each wake-up we compute how many packets are *due*
+        since the stream started and emit exactly that many (in a small burst).
+        This keeps the average rate at exactly 48 kHz with no cumulative drift,
+        and the RTP timestamp — which advances 48 samples per packet — stays
+        locked to real time. A receiver's link-offset buffer absorbs the
+        sub-burst jitter (use >=5 ms receiver latency for a software source).
         """
         bytes_per_packet = _SAMPLES_PER_PACKET * 3  # 48 samples × 3 bytes = 144
         packet_interval = _AES67_PACKET_TIME_MS / 1000.0  # 1ms
 
-        t_start = time.monotonic()
-        packet_count = 0
+        # Cap how many packets we emit per wake-up so a scheduling hiccup is
+        # recovered as a short burst (~20ms) rather than a flood the receiver
+        # buffer can't absorb.
+        MAX_CATCHUP_PACKETS = 20
+        # If we ever fall this far behind (machine stall, GC pause, suspend),
+        # replaying the whole gap would overrun the receiver — skip ahead,
+        # advance the RTP clock across the gap, and mark a discontinuity.
+        RESYNC_THRESHOLD_PACKETS = 200  # 200ms
 
-        logger.info("AES67 continuous stream started (1ms packet cadence)")
+        t_start = time.monotonic()
+        packets_sent = 0            # packets emitted since t_start (drives pacing)
+        total_packets = 0           # lifetime counter (logging only)
+        prev_was_silence = True     # so the first audio packet gets the marker bit
+
+        logger.info("AES67 continuous stream started (1ms cadence, drift-free burst pacing)")
 
         while self._running:
-            # Get audio from buffer, or use silence
-            with self._audio_lock:
-                if len(self._audio_buffer) >= bytes_per_packet:
-                    payload = bytes(self._audio_buffer[:bytes_per_packet])
-                    del self._audio_buffer[:bytes_per_packet]
-                else:
-                    payload = self._silence_packet
-
-            # Build and send RTP packet
-            # Set marker bit on first packet and after silence→audio transitions
-            header = self._build_rtp_header(marker=(packet_count == 0))
-            packet = header + payload
-
-            try:
-                self._rtp_sock.sendto(packet, (self.multicast_addr, self.port))
-            except OSError as e:
-                if self._running:
-                    logger.error("RTP send failed: %s", e)
-                break
-
-            self._rtp_seq = (self._rtp_seq + 1) & 0xFFFF
-            self._rtp_ts = (self._rtp_ts + _SAMPLES_PER_PACKET) & 0xFFFFFFFF
-            packet_count += 1
-
-            # Pace to real-time
-            expected_time = t_start + packet_count * packet_interval
             now = time.monotonic()
-            if expected_time > now:
-                time.sleep(expected_time - now)
-            elif now - expected_time > 0.01:
-                # We've fallen behind by >10ms — reset timing to avoid burst
-                t_start = now
-                packet_count = 0
+            due = int((now - t_start) / packet_interval)
+            behind = due - packets_sent
 
-        logger.info("AES67 continuous stream stopped (sent %d packets)", packet_count)
+            if behind > RESYNC_THRESHOLD_PACKETS:
+                logger.warning(
+                    "AES67 pacing fell behind by %d packets (%dms) — resyncing timeline",
+                    behind, behind * _AES67_PACKET_TIME_MS,
+                )
+                # Advance the media clock across the skipped gap so timestamps
+                # stay tied to real time, and force a marker on the next packet.
+                self._rtp_ts = (self._rtp_ts + behind * _SAMPLES_PER_PACKET) & 0xFFFFFFFF
+                packets_sent = due
+                prev_was_silence = True
+                continue
+
+            if behind <= 0:
+                # Caught up — sleep until the next packet is due.
+                sleep_for = t_start + (packets_sent + 1) * packet_interval - time.monotonic()
+                if sleep_for > 0:
+                    time.sleep(sleep_for)
+                continue
+
+            burst = min(behind, MAX_CATCHUP_PACKETS)
+            for _ in range(burst):
+                with self._audio_lock:
+                    if len(self._audio_buffer) >= bytes_per_packet:
+                        payload = bytes(self._audio_buffer[:bytes_per_packet])
+                        del self._audio_buffer[:bytes_per_packet]
+                        is_silence = False
+                    else:
+                        payload = self._silence_packet
+                        is_silence = True
+
+                # RTP marker bit flags the first packet of a talkspurt (the
+                # silence→audio transition) per RFC 3550.
+                marker = (not is_silence) and prev_was_silence
+                prev_was_silence = is_silence
+
+                header = self._build_rtp_header(marker=marker)
+                try:
+                    self._rtp_sock.sendto(header + payload, (self.multicast_addr, self.port))
+                except OSError as e:
+                    if self._running:
+                        logger.error("RTP send failed: %s", e)
+                    logger.info("AES67 continuous stream stopped (sent %d packets)", total_packets)
+                    return
+
+                self._rtp_seq = (self._rtp_seq + 1) & 0xFFFF
+                self._rtp_ts = (self._rtp_ts + _SAMPLES_PER_PACKET) & 0xFFFFFFFF
+                packets_sent += 1
+                total_packets += 1
+            # If still behind after this burst, loop again immediately.
+
+        logger.info("AES67 continuous stream stopped (sent %d packets)", total_packets)
 
     def _build_rtp_header(self, marker: bool = False) -> bytes:
         """Build a 12-byte RTP header (RFC 3550)."""

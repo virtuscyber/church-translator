@@ -122,6 +122,33 @@ class VADChunker:
         # Leftover audio from last feed that didn't fill a frame
         self._leftover = np.array([], dtype=np.float32)
 
+    def update_settings(
+        self,
+        *,
+        aggressiveness: Optional[int] = None,
+        min_chunk_sec: Optional[float] = None,
+        max_chunk_sec: Optional[float] = None,
+        silence_threshold_sec: Optional[float] = None,
+    ) -> None:
+        """Update chunking parameters in place (for live tuning).
+
+        ``min_chunk_sec`` / ``max_chunk_sec`` / ``silence_threshold_sec`` are
+        read on every ``feed()``, so changing them takes effect immediately.
+        Changing ``aggressiveness`` rebuilds the energy VAD; its adaptive noise
+        floor re-converges within a second or two.
+
+        Callers feeding audio from another thread should hold the same lock
+        they use around ``feed()`` while calling this.
+        """
+        if aggressiveness is not None:
+            self.vad = EnergyVAD(aggressiveness)
+        if min_chunk_sec is not None:
+            self.min_chunk_sec = float(min_chunk_sec)
+        if max_chunk_sec is not None:
+            self.max_chunk_sec = float(max_chunk_sec)
+        if silence_threshold_sec is not None:
+            self.silence_threshold_sec = float(silence_threshold_sec)
+
     def feed(self, audio: np.ndarray) -> list[tuple[str, bytes]]:
         """Feed audio data and get back any completed chunks.
         

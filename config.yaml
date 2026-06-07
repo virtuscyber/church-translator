@@ -8,11 +8,20 @@ audio:
 transcription:
   model: "gpt-4o-transcribe"
   language: "uk"              # Ukrainian (ISO 639-1)
+  temperature: 0.0            # 0 = deterministic; reduces STT hallucination
+  gate_silence: true          # Skip near-silent chunks before STT (kills the
+                              #   #1 source of phantom transcripts on dead air)
+  silence_peak: 0.008         # Peak amplitude (0-1) below which a chunk counts
+                              #   as silence. Lower if quiet speech gets dropped.
+  min_duration_sec: 0.4       # Drop chunks shorter than this
+  filter_hallucinations: true # Drop known artifacts ("thanks for watching")
+                              #   and repetition loops
 
 translation:
   model: "gpt-4o"
-  temperature: 0.3
+  temperature: 0.0            # 0 = faithful, deterministic translation
   prompt_file: "prompts/biblical_translator.txt"
+  filter_hallucinations: true
 
 synthesis:
   provider: "elevenlabs"      # "elevenlabs" or "openai"

@@ -24,13 +24,20 @@ class AudioConfig:
 class TranscriptionConfig:
     model: str = "gpt-4o-transcribe"
     language: str = "uk"
+    temperature: float = 0.0          # 0 = deterministic, least hallucination
+    gate_silence: bool = True         # Skip near-silent chunks before STT
+    silence_peak: float = 0.008       # Peak amplitude (0-1) below which a chunk
+                                       #   is treated as silence/noise
+    min_duration_sec: float = 0.4     # Chunks shorter than this are skipped
+    filter_hallucinations: bool = True  # Drop known artifacts / repetition loops
 
 
 @dataclass
 class TranslationConfig:
     model: str = "gpt-4o"
-    temperature: float = 0.3
+    temperature: float = 0.0
     prompt_file: str = "prompts/biblical_translator.txt"
+    filter_hallucinations: bool = True
     _system_prompt: str = ""
 
     @property

@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import threading
+import time
 from typing import AsyncIterator, Optional
 
 import numpy as np
@@ -60,12 +61,18 @@ class VADAudioCapture:
         self._running = False
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._chunker_lock = threading.Lock()
+        # Monotonic timestamp of the last audio callback. A healthy input
+        # stream fires continuously (even in silence), so a stale value means
+        # the device has stalled or been unplugged.
+        self._last_frame_monotonic: float = 0.0
 
     def _audio_callback(self, indata: np.ndarray, frames: int, time_info, status):
         """Called from audio thread — feed to VAD chunker."""
         if status:
             logger.warning("Audio status: %s", status)
-        
+
+        self._last_frame_monotonic = time.monotonic()
+
         # VAD chunker expects mono float32
         audio = indata[:, 0] if indata.ndim > 1 else indata.flatten()
 
@@ -78,16 +85,8 @@ class VADAudioCapture:
                 except RuntimeError:
                     logger.debug("Event loop closed before queued VAD chunk could be delivered")
 
-    async def start(self):
-        """Start VAD-aware audio capture."""
-        self._loop = asyncio.get_running_loop()
-        self._running = True
-        
-        logger.info(
-            "Starting VAD capture: device=%s, rate=%d",
-            self.device, self.sample_rate,
-        )
-
+    def _open_stream(self):
+        """Open and start the PortAudio input stream (used by start/restart)."""
         sd = _load_sounddevice()
         self._stream = sd.InputStream(
             device=self.device,
@@ -98,6 +97,49 @@ class VADAudioCapture:
             callback=self._audio_callback,
         )
         self._stream.start()
+        self._last_frame_monotonic = time.monotonic()
+
+    async def start(self):
+        """Start VAD-aware audio capture."""
+        self._loop = asyncio.get_running_loop()
+        self._running = True
+
+        logger.info(
+            "Starting VAD capture: device=%s, rate=%d",
+            self.device, self.sample_rate,
+        )
+
+        self._open_stream()
+
+    def update_chunking(self, **kwargs) -> None:
+        """Live-update VAD/chunking parameters (aggressiveness, min/max chunk
+        seconds, silence threshold). Held under the chunker lock so it can't
+        race the audio thread mid-``feed()``."""
+        with self._chunker_lock:
+            self._chunker.update_settings(**kwargs)
+
+    def seconds_since_audio(self) -> float:
+        """Seconds since the last audio callback (0 if not started yet)."""
+        if not self._running or self._last_frame_monotonic == 0.0:
+            return 0.0
+        return time.monotonic() - self._last_frame_monotonic
+
+    async def restart(self):
+        """Re-open the input stream after a stall/disconnect.
+
+        Raises if the device can't be re-opened (e.g. truly unplugged) so the
+        caller can surface the failure to the operator.
+        """
+        logger.warning("Restarting audio capture stream (device=%s)", self.device)
+        if self._stream is not None:
+            try:
+                self._stream.stop()
+                self._stream.close()
+            except Exception as e:
+                logger.debug("Error closing stalled stream: %s", e)
+            self._stream = None
+        self._open_stream()
+        logger.info("Audio capture stream restarted")
 
     async def stop(self):
         """Stop capture and flush remaining audio."""

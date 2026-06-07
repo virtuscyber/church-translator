@@ -605,8 +605,63 @@
         .btn-stop-live:hover { background: var(--border); }
         .live-status-text { margin-top: 12px; font-size: 14px; color: var(--text-dim); min-height: 22px; }
 
+        /* ── Collapsible sections ───────────────── */
+        .section {
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: var(--radius);
+            overflow: hidden;
+        }
+        .section-head {
+            display: flex; align-items: center; justify-content: space-between;
+            gap: 12px; padding: 18px 24px; cursor: pointer; user-select: none;
+            transition: background 0.15s;
+        }
+        .section-head:hover { background: var(--surface-2); }
+        .section-head .head-left { display: flex; align-items: center; gap: 10px; }
+        .section-head h2 { font-size: 16px; font-weight: 600; display: flex; align-items: center; gap: 8px; margin: 0; }
+        .section-sub { font-size: 12px; color: var(--text-dim); font-weight: 400; }
+        .section-head .chev { color: var(--text-dim); transition: transform 0.2s; font-size: 12px; }
+        .section.collapsed .section-head .chev { transform: rotate(-90deg); }
+        .section-body { padding: 0 24px 24px; }
+        .section.collapsed .section-body { display: none; }
+
+        /* ── Hero live card ─────────────────────── */
+        .live-hero {
+            background: linear-gradient(135deg, var(--surface) 0%, var(--surface-2) 100%);
+            border: 1px solid var(--border);
+            border-radius: var(--radius);
+            padding: 28px;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 24px;
+            flex-wrap: wrap;
+        }
+        .live-hero .hero-text h2 { font-size: 18px; margin-bottom: 4px; }
+
+        /* ── Apply bar ──────────────────────────── */
+        .apply-bar {
+            position: sticky; bottom: 0;
+            display: flex; align-items: center; justify-content: space-between; gap: 12px;
+            margin-top: 20px; padding: 14px 0 2px; border-top: 1px solid var(--border);
+            background: var(--surface);
+        }
+        .dirty-indicator {
+            display: none; align-items: center; gap: 8px;
+            font-size: 13px; color: var(--amber); font-weight: 600;
+        }
+        .dirty-indicator.show { display: flex; }
+        .dirty-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--amber); animation: pulse 1.5s ease-in-out infinite; }
+        .apply-saved { display: none; align-items: center; gap: 6px; font-size: 13px; color: var(--green); }
+        .apply-saved.show { display: flex; }
+
+        .lang-text.translated { font-size: 16px; }
+
         /* ── Responsive ─────────────────────────── */
         @media (max-width: 768px) {
+            .live-hero { flex-direction: column; align-items: stretch; text-align: center; }
+            .live-hero .hero-actions { display: flex; justify-content: center; }
             .header { padding: 16px; flex-wrap: wrap; }
             .main { padding: 16px; }
             .stats-row { grid-template-columns: repeat(2, 1fr); }
@@ -645,9 +700,67 @@
 <!-- Main Content -->
 <main class="main">
 
-    <!-- Audio & Language Settings -->
-    <div class="card" id="settingsPanel">
-        <h2>🎛️ Audio & Language Settings</h2>
+    <!-- Live Translation (hero) -->
+    <div class="live-hero">
+        <div class="hero-text">
+            <h2>Live Translation</h2>
+            <div class="live-status-text" id="liveStatusText">Select your microphone and language below, then start translating.</div>
+        </div>
+        <div class="hero-actions">
+            <button class="btn-live" id="liveStartBtn" onclick="startLive()">● Start Live Translation</button>
+            <button class="btn-stop-live" id="liveStopBtn" onclick="stopLive()" style="display:none;">■ Stop Translation</button>
+        </div>
+    </div>
+
+    <!-- Stats Row -->
+    <div class="stats-row">
+        <div class="stat-card">
+            <div class="label">Chunks Translated</div>
+            <div class="value" id="statChunks">0</div>
+        </div>
+        <div class="stat-card">
+            <div class="label">Avg Latency</div>
+            <div class="value" id="statLatency">—<span class="unit">s</span></div>
+        </div>
+        <div class="stat-card">
+            <div class="label">Runtime</div>
+            <div class="value" id="statRuntime">—<span class="unit">s</span></div>
+        </div>
+        <div class="stat-card">
+            <div class="label">Status</div>
+            <div class="value" id="statStatus" style="font-size: 18px; color: var(--text-dim);">Ready to start</div>
+        </div>
+    </div>
+
+    <!-- Transcript -->
+    <div class="transcript-section">
+        <div class="transcript-header">
+            <h2>📜 Live Transcript</h2>
+            <div style="display:flex;align-items:center;gap:10px;">
+                <span class="transcript-count" id="transcriptCount">0 segments</span>
+                <button class="btn btn-secondary btn-sm" onclick="exportTranscript('txt')" title="Download transcript as text">⬇ TXT</button>
+                <button class="btn btn-secondary btn-sm" onclick="exportTranscript('srt')" title="Download transcript as subtitles">⬇ SRT</button>
+            </div>
+        </div>
+        <div class="transcript-body" id="transcriptBody">
+            <div class="transcript-empty" id="transcriptEmpty">
+                <div class="icon">🎤</div>
+                <p>No translations yet</p>
+                <p style="font-size: 13px; margin-top: 4px;">Start live translation above, or test with an audio file below</p>
+            </div>
+        </div>
+    </div>
+
+    <!-- Audio & Language Settings (collapsible) -->
+    <div class="section" id="settingsSection">
+        <div class="section-head" onclick="toggleSection(this)">
+            <div class="head-left">
+                <h2>🎛️ Audio &amp; Language Settings</h2>
+                <span class="section-sub" id="settingsAppliedHint">Changes apply live while running</span>
+            </div>
+            <span class="chev">▼</span>
+        </div>
+        <div class="section-body">
 
         <!-- Audio Devices -->
         <div class="form-row">
@@ -769,83 +882,153 @@
             <textarea id="customVocab" placeholder="e.g., Bethel, Jehovah Jireh, Pastor Petro Ivanov..."></textarea>
         </div>
 
-        <div style="display:flex;justify-content:flex-end;margin-top:12px;">
-            <button class="btn btn-primary btn-sm" onclick="saveSettings()">💾 Save Settings</button>
-        </div>
-    </div>
-
-    <!-- Health Check Panel -->
-    <div class="health-panel" id="healthPanel">
-        <h2>System Health</h2>
-        <div class="health-grid" id="healthGrid">
-            <div class="health-item" id="healthPython"><div class="health-icon">...</div><div><div class="health-label">Python</div><div class="health-detail">Checking...</div></div></div>
-            <div class="health-item" id="healthFfmpeg"><div class="health-icon">...</div><div><div class="health-label">ffmpeg</div><div class="health-detail">Checking...</div></div></div>
-            <div class="health-item" id="healthApiKeys"><div class="health-icon">...</div><div><div class="health-label">API Keys</div><div class="health-detail">Checking...</div></div></div>
-            <div class="health-item" id="healthAudio"><div class="health-icon">...</div><div><div class="health-label">Audio Devices</div><div class="health-detail">Checking...</div></div></div>
-            <div class="health-item" id="healthNetwork"><div class="health-icon">...</div><div><div class="health-label">Network</div><div class="health-detail">Checking...</div></div></div>
-        </div>
-    </div>
-
-    <!-- Live Translation Controls -->
-    <div class="live-controls">
-        <h2>Live Translation</h2>
-        <div>
-            <button class="btn-live" id="liveStartBtn" onclick="startLive()">Start Live Translation</button>
-            <button class="btn-stop-live" id="liveStopBtn" onclick="stopLive()" style="display:none;">Stop Translation</button>
-        </div>
-        <div class="live-status-text" id="liveStatusText">Select your microphone and language above, then start translating.</div>
-    </div>
-
-    <!-- Stats Row -->
-    <div class="stats-row">
-        <div class="stat-card">
-            <div class="label">Chunks Translated</div>
-            <div class="value" id="statChunks">0</div>
-        </div>
-        <div class="stat-card">
-            <div class="label">Avg Latency</div>
-            <div class="value" id="statLatency">—<span class="unit">s</span></div>
-        </div>
-        <div class="stat-card">
-            <div class="label">Runtime</div>
-            <div class="value" id="statRuntime">—<span class="unit">s</span></div>
-        </div>
-        <div class="stat-card">
-            <div class="label">Status</div>
-            <div class="value" id="statStatus" style="font-size: 18px; color: var(--text-dim);">Ready to start</div>
-        </div>
-    </div>
-
-    <!-- Controls -->
-    <div class="controls">
-        <h2>🎛️ Test with Audio File</h2>
-        <div class="file-input-group">
-            <input type="text" id="fileInput" placeholder="Path to audio file (e.g. samples/sermon_clip.wav)" value="samples/sermon_clip.wav">
-            <button class="btn btn-primary" id="startBtn" onclick="startTest()">▶ Translate</button>
-            <button class="btn btn-danger" id="stopBtn" onclick="stopTest()" style="display:none;">⏹ Stop</button>
-        </div>
-        <div class="progress-container" id="progressContainer">
-            <div class="progress-bar-bg">
-                <div class="progress-bar-fill" id="progressFill"></div>
+        <!-- Advanced live-tuning -->
+        <details id="advancedTuning" style="border:1px solid var(--border);border-radius:8px;padding:8px 12px;margin-top:8px;">
+            <summary style="cursor:pointer;font-weight:600;color:var(--accent);">🔧 Advanced tuning (applies live)</summary>
+            <div style="font-size:0.82em;color:var(--text-dim);margin:8px 0;">
+                These take effect immediately while running. Defaults suit most rooms — tweak only if you hear phantom text, dropped quiet speech, or choppy segmentation.
             </div>
-            <div class="progress-label">
-                <span id="progressText">Processing...</span>
-                <span id="progressPct">0%</span>
+
+            <h4 style="margin:10px 0 6px;color:var(--text);">🎯 Transcription quality</h4>
+            <div class="form-row">
+                <div class="form-group">
+                    <label><input type="checkbox" id="tuneGateSilence"> Gate near-silent chunks (anti-hallucination)</label>
+                    <label style="margin-top:6px;"><input type="checkbox" id="tuneFilterHalluc"> Filter known hallucination phrases</label>
+                </div>
+                <div class="form-group">
+                    <label>Silence threshold (peak 0–0.2) <span class="hint" id="tuneSilencePeakVal"></span></label>
+                    <input type="range" id="tuneSilencePeak" min="0" max="0.05" step="0.001" oninput="document.getElementById('tuneSilencePeakVal').textContent=this.value">
+                    <label style="margin-top:6px;">Min chunk duration (s)</label>
+                    <input type="number" id="tuneMinDuration" min="0" max="5" step="0.1">
+                </div>
+            </div>
+            <div class="form-row">
+                <div class="form-group">
+                    <label>STT temperature (0 = deterministic)</label>
+                    <input type="number" id="tuneSttTemp" min="0" max="1" step="0.05">
+                </div>
+                <div class="form-group">
+                    <label>Translation temperature</label>
+                    <input type="number" id="tuneTransTemp" min="0" max="1" step="0.05">
+                </div>
+            </div>
+
+            <h4 style="margin:12px 0 6px;color:var(--text);">🗣️ Voice activity / chunking</h4>
+            <div class="form-row">
+                <div class="form-group">
+                    <label>VAD aggressiveness</label>
+                    <select id="tuneVadAggr">
+                        <option value="0">0 — least filtering (quiet rooms)</option>
+                        <option value="1">1</option>
+                        <option value="2">2 — default</option>
+                        <option value="3">3 — most filtering (noisy/reverb)</option>
+                    </select>
+                    <label style="margin-top:6px;">Silence split threshold (s)</label>
+                    <input type="number" id="tuneSilenceThresh" min="0.1" max="3" step="0.1">
+                </div>
+                <div class="form-group">
+                    <label>Min chunk (s)</label>
+                    <input type="number" id="tuneMinChunk" min="0.5" max="15" step="0.5">
+                    <label style="margin-top:6px;">Max chunk (s)</label>
+                    <input type="number" id="tuneMaxChunk" min="1" max="30" step="0.5">
+                </div>
+            </div>
+
+            <h4 style="margin:12px 0 6px;color:var(--text);">🛡️ Reliability</h4>
+            <div class="form-row">
+                <div class="form-group">
+                    <label>API timeout (s)</label>
+                    <input type="number" id="tuneApiTimeout" min="5" max="120" step="1">
+                    <label style="margin-top:6px;">Max retries</label>
+                    <input type="number" id="tuneMaxRetries" min="0" max="6" step="1">
+                </div>
+                <div class="form-group">
+                    <label>Mic-stall watchdog (s)</label>
+                    <input type="number" id="tuneWatchdog" min="2" max="60" step="1">
+                </div>
+            </div>
+
+            <h4 style="margin:12px 0 6px;color:var(--text);">📡 AES67 / Dante output</h4>
+            <div class="form-group" style="font-size:0.8em;color:var(--text-dim);">
+                Changing these restarts the RTP sender and re-announces the stream. Use ≥5 ms receiver latency for a software source.
+            </div>
+            <div class="form-row">
+                <div class="form-group">
+                    <label>Output mode</label>
+                    <select id="tuneOutputMode">
+                        <option value="sounddevice">Speaker only (no AES67)</option>
+                        <option value="dante">AES67/Dante only</option>
+                        <option value="both">Speaker + AES67/Dante</option>
+                    </select>
+                    <label style="margin-top:6px;">Stream name</label>
+                    <input type="text" id="tuneStreamName" placeholder="Church Translation EN">
+                </div>
+                <div class="form-group">
+                    <label>Multicast address</label>
+                    <input type="text" id="tuneMulticast" placeholder="239.69.0.1">
+                    <div class="form-row" style="margin-top:6px;">
+                        <div class="form-group"><label>Port</label><input type="number" id="tunePort" min="1024" max="65535" step="1"></div>
+                        <div class="form-group"><label>TTL</label><input type="number" id="tuneTtl" min="1" max="255" step="1"></div>
+                    </div>
+                </div>
+            </div>
+        </details>
+
+        <!-- Apply / Save bar -->
+        <div class="apply-bar">
+            <div style="display:flex;align-items:center;gap:14px;">
+                <span class="dirty-indicator" id="dirtyIndicator"><span class="dirty-dot"></span>Unsaved changes</span>
+                <span class="apply-saved" id="savedIndicator">✓ Saved</span>
+            </div>
+            <button class="btn btn-primary" id="applyBtn" onclick="applySettings()">💾 Save Settings</button>
+        </div>
+
+        </div><!-- /section-body -->
+    </div><!-- /settings section -->
+
+    <!-- System Health (collapsible) -->
+    <div class="section collapsed" id="healthSection">
+        <div class="section-head" onclick="toggleSection(this)">
+            <div class="head-left">
+                <h2>🩺 System Health</h2>
+                <span class="section-sub" id="healthSummary">Checking…</span>
+            </div>
+            <span class="chev">▼</span>
+        </div>
+        <div class="section-body">
+            <div class="health-grid" id="healthGrid">
+                <div class="health-item" id="healthPython"><div class="health-icon">...</div><div><div class="health-label">Python</div><div class="health-detail">Checking...</div></div></div>
+                <div class="health-item" id="healthFfmpeg"><div class="health-icon">...</div><div><div class="health-label">ffmpeg</div><div class="health-detail">Checking...</div></div></div>
+                <div class="health-item" id="healthApiKeys"><div class="health-icon">...</div><div><div class="health-label">API Keys</div><div class="health-detail">Checking...</div></div></div>
+                <div class="health-item" id="healthAudio"><div class="health-icon">...</div><div><div class="health-label">Audio Devices</div><div class="health-detail">Checking...</div></div></div>
+                <div class="health-item" id="healthNetwork"><div class="health-icon">...</div><div><div class="health-label">Network</div><div class="health-detail">Checking...</div></div></div>
             </div>
         </div>
     </div>
 
-    <!-- Transcript -->
-    <div class="transcript-section">
-        <div class="transcript-header">
-            <h2>📜 Live Transcript</h2>
-            <span class="transcript-count" id="transcriptCount">0 segments</span>
+    <!-- Test with Audio File (collapsible) -->
+    <div class="section collapsed" id="fileTestSection">
+        <div class="section-head" onclick="toggleSection(this)">
+            <div class="head-left">
+                <h2>🎛️ Test with Audio File</h2>
+                <span class="section-sub">Dry-run a recording before going live</span>
+            </div>
+            <span class="chev">▼</span>
         </div>
-        <div class="transcript-body" id="transcriptBody">
-            <div class="transcript-empty" id="transcriptEmpty">
-                <div class="icon">🎤</div>
-                <p>No translations yet</p>
-                <p style="font-size: 13px; margin-top: 4px;">Enter an audio file path above and click Translate to begin</p>
+        <div class="section-body">
+            <div class="file-input-group">
+                <input type="text" id="fileInput" placeholder="Path to audio file (e.g. samples/sermon_clip.wav)" value="samples/sermon_clip.wav">
+                <button class="btn btn-primary" id="startBtn" onclick="startTest()">▶ Translate</button>
+                <button class="btn btn-danger" id="stopBtn" onclick="stopTest()" style="display:none;">⏹ Stop</button>
+            </div>
+            <div class="progress-container" id="progressContainer">
+                <div class="progress-bar-bg">
+                    <div class="progress-bar-fill" id="progressFill"></div>
+                </div>
+                <div class="progress-label">
+                    <span id="progressText">Processing...</span>
+                    <span id="progressPct">0%</span>
+                </div>
             </div>
         </div>
     </div>
@@ -922,6 +1105,7 @@
     let wizardStep = 1;
     let languages = [];
     let pageUnloading = false;
+    let liveMode = false;
 
     const AUTH_TOKEN_STORAGE_KEY = 'dashboard_api_token';
     const originalFetch = window.fetch.bind(window);
@@ -978,6 +1162,66 @@
         bars.appendChild(div);
     }
 
+    // ── Collapsible sections ──────────────────────
+    function toggleSection(headEl) {
+        const section = headEl.closest('.section');
+        if (section) section.classList.toggle('collapsed');
+    }
+
+    // ── Unsaved-changes (dirty) tracking ──────────
+    let settingsDirty = false;
+    let suppressDirty = false;   // set while we programmatically load values
+
+    const SETTINGS_FIELD_IDS = [
+        'inputDevice', 'outputDevice', 'sourceLang', 'targetLang',
+        'sttModel', 'translationModel', 'ttsModel', 'voiceSelect', 'customVocab',
+        // Advanced live-tuning fields
+        'tuneGateSilence', 'tuneSilencePeak', 'tuneMinDuration', 'tuneFilterHalluc',
+        'tuneSttTemp', 'tuneTransTemp', 'tuneVadAggr', 'tuneMinChunk', 'tuneMaxChunk',
+        'tuneSilenceThresh', 'tuneApiTimeout', 'tuneMaxRetries', 'tuneWatchdog',
+        'tuneOutputMode', 'tuneStreamName', 'tuneMulticast', 'tunePort', 'tuneTtl',
+    ];
+
+    function markDirty() {
+        if (suppressDirty) return;
+        settingsDirty = true;
+        document.getElementById('dirtyIndicator').classList.add('show');
+        document.getElementById('savedIndicator').classList.remove('show');
+        refreshApplyButton();
+    }
+
+    function clearDirty() {
+        settingsDirty = false;
+        document.getElementById('dirtyIndicator').classList.remove('show');
+        const saved = document.getElementById('savedIndicator');
+        saved.classList.add('show');
+        setTimeout(() => saved.classList.remove('show'), 2500);
+        refreshApplyButton();
+    }
+
+    function refreshApplyButton() {
+        const btn = document.getElementById('applyBtn');
+        if (!btn) return;
+        if (liveMode) {
+            btn.textContent = settingsDirty ? '⚡ Apply Live' : '⚡ Apply Live';
+            btn.title = 'Apply changes to the running translation instantly';
+        } else {
+            btn.textContent = '💾 Save Settings';
+            btn.title = 'Save settings';
+        }
+    }
+
+    function wireDirtyTracking() {
+        SETTINGS_FIELD_IDS.forEach(id => {
+            const el = document.getElementById(id);
+            if (!el) return;
+            el.addEventListener('change', markDirty);
+            if (el.tagName === 'TEXTAREA' || el.type === 'text') {
+                el.addEventListener('input', markDirty);
+            }
+        });
+    }
+
     // ── Init ──────────────────────────────────────
     connectWS();
     loadDevices();
@@ -985,6 +1229,8 @@
     populateLanguageDropdowns();
     checkSetupStatus();
     loadHealthChecks();
+    loadTuning();
+    wireDirtyTracking();
 
     function populateLanguageDropdowns() {
         const sourceExclude = ['en'];  // English typically not a source for church translation
@@ -1446,49 +1692,150 @@
     document.getElementById('sourceLang').addEventListener('change', updateLangPairLabel);
     document.getElementById('targetLang').addEventListener('change', updateLangPairLabel);
 
-    async function saveSettings() {
+    // Read advanced tuning fields. Returns {} if the panel hasn't loaded yet
+    // (e.g. /api/tuning failed) so we never send empty/NaN values.
+    function collectTuning() {
+        const g = id => document.getElementById(id);
+        if (!g('tuneSilencePeak') || g('tuneSilencePeak').value === '') return {};
+        const num = id => parseFloat(g(id).value);
+        return {
+            gate_silence: g('tuneGateSilence').checked,
+            filter_hallucinations: g('tuneFilterHalluc').checked,
+            silence_peak: num('tuneSilencePeak'),
+            min_duration_sec: num('tuneMinDuration'),
+            stt_temperature: num('tuneSttTemp'),
+            translation_temperature: num('tuneTransTemp'),
+            vad_aggressiveness: parseInt(g('tuneVadAggr').value),
+            min_chunk_sec: num('tuneMinChunk'),
+            max_chunk_sec: num('tuneMaxChunk'),
+            silence_threshold_sec: num('tuneSilenceThresh'),
+            api_timeout: num('tuneApiTimeout'),
+            max_retries: parseInt(g('tuneMaxRetries').value),
+            mic_watchdog_sec: num('tuneWatchdog'),
+            output_mode: g('tuneOutputMode').value,
+            aes67_stream_name: g('tuneStreamName').value,
+            aes67_multicast: g('tuneMulticast').value,
+            aes67_port: parseInt(g('tunePort').value),
+            aes67_ttl: parseInt(g('tuneTtl').value),
+        };
+    }
+
+    function collectSettings() {
         const inputVal = document.getElementById('inputDevice').value || null;
         const outputVal = document.getElementById('outputDevice').value || null;
-
-        const data = {
-            input_device: inputVal,
-            output_device: outputVal,
-            source_language: document.getElementById('sourceLang').value,
-            target_language: document.getElementById('targetLang').value,
-            custom_vocabulary: document.getElementById('customVocab').value,
-            elevenlabs_voice_id: document.getElementById('voiceSelect').value || null,
-            stt_model: document.getElementById('sttModel').value,
-            translation_model: document.getElementById('translationModel').value,
-            tts_model: document.getElementById('ttsModel').value,
+        return {
+            inputVal, outputVal,
+            data: {
+                input_device: inputVal,
+                output_device: outputVal,
+                source_language: document.getElementById('sourceLang').value,
+                target_language: document.getElementById('targetLang').value,
+                custom_vocabulary: document.getElementById('customVocab').value,
+                elevenlabs_voice_id: document.getElementById('voiceSelect').value || null,
+                stt_model: document.getElementById('sttModel').value,
+                translation_model: document.getElementById('translationModel').value,
+                tts_model: document.getElementById('ttsModel').value,
+                ...collectTuning(),
+            },
         };
+    }
+
+    // Populate the advanced tuning fields from the server's effective values.
+    async function loadTuning() {
         try {
-            await apiFetch('/api/config', {
+            const res = await apiFetch('/api/tuning');
+            if (!res.ok) return;
+            const t = await res.json();
+            const g = id => document.getElementById(id);
+            const setNum = (id, v) => { if (g(id) && v !== undefined && v !== null) g(id).value = v; };
+            if (g('tuneGateSilence')) g('tuneGateSilence').checked = !!t.gate_silence;
+            if (g('tuneFilterHalluc')) g('tuneFilterHalluc').checked = !!t.filter_hallucinations;
+            setNum('tuneSilencePeak', t.silence_peak);
+            const sp = g('tuneSilencePeakVal'); if (sp) sp.textContent = t.silence_peak;
+            setNum('tuneMinDuration', t.min_duration_sec);
+            setNum('tuneSttTemp', t.stt_temperature);
+            setNum('tuneTransTemp', t.translation_temperature);
+            if (g('tuneVadAggr')) g('tuneVadAggr').value = String(t.vad_aggressiveness);
+            setNum('tuneMinChunk', t.min_chunk_sec);
+            setNum('tuneMaxChunk', t.max_chunk_sec);
+            setNum('tuneSilenceThresh', t.silence_threshold_sec);
+            setNum('tuneApiTimeout', t.api_timeout);
+            setNum('tuneMaxRetries', t.max_retries);
+            setNum('tuneWatchdog', t.mic_watchdog_sec);
+            if (g('tuneOutputMode')) g('tuneOutputMode').value = t.output_mode || 'sounddevice';
+            if (g('tuneStreamName')) g('tuneStreamName').value = t.aes67_stream_name || '';
+            if (g('tuneMulticast')) g('tuneMulticast').value = t.aes67_multicast || '';
+            setNum('tunePort', t.aes67_port);
+            setNum('tuneTtl', t.aes67_ttl);
+        } catch (e) { /* non-fatal — keep placeholder values */ }
+    }
+
+    function rememberDeviceFingerprints(inputVal, outputVal) {
+        if (inputVal) {
+            apiFetch('/api/devices/remember', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({role: 'input', device_index: parseInt(inputVal)}),
+            }).catch(() => {});
+        }
+        if (outputVal) {
+            apiFetch('/api/devices/remember', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({role: 'output', device_index: parseInt(outputVal)}),
+            }).catch(() => {});
+        }
+    }
+
+    // Unified save + live-apply. Persists settings and, when a live session is
+    // running, hot-applies model/voice/vocabulary/language changes instantly.
+    // Mic/speaker changes need an audio restart, which we trigger seamlessly.
+    async function applySettings(opts = {}) {
+        const {inputVal, outputVal, data} = collectSettings();
+        const btn = document.getElementById('applyBtn');
+        if (btn) btn.disabled = true;
+        try {
+            const res = await apiFetch('/api/apply', {
                 method: 'POST',
                 headers: {'Content-Type': 'application/json'},
                 body: JSON.stringify(data),
             });
+            const result = await res.json().catch(() => ({}));
 
-            // Remember device fingerprints for next time
-            if (inputVal) {
-                apiFetch('/api/devices/remember', {
-                    method: 'POST',
-                    headers: {'Content-Type': 'application/json'},
-                    body: JSON.stringify({role: 'input', device_index: parseInt(inputVal)}),
-                }).catch(() => {});
-            }
-            if (outputVal) {
-                apiFetch('/api/devices/remember', {
-                    method: 'POST',
-                    headers: {'Content-Type': 'application/json'},
-                    body: JSON.stringify({role: 'output', device_index: parseInt(outputVal)}),
-                }).catch(() => {});
-            }
-
+            rememberDeviceFingerprints(inputVal, outputVal);
             updateLangPairLabel();
-            showToast('✅ Settings saved! Device preferences remembered.');
+            clearDirty();
+
+            // Device changes can't hot-swap — restart the audio seamlessly.
+            if (result.restart_needed && liveMode && !opts.fromStart) {
+                showToast('🔄 ' + (result.restart_reason || 'Restarting audio') + '… applying');
+                await stopLive();
+                await new Promise(r => setTimeout(r, 300));
+                await startLive({skipApply: true});
+                return result;
+            }
+
+            if (!opts.silent) {
+                if (result.live && result.applied && result.applied.length) {
+                    showToast('⚡ Applied live: ' + result.applied.join(', '));
+                } else if (result.live) {
+                    showToast('✅ Saved (no live-applicable changes)');
+                } else {
+                    showToast('✅ Settings saved');
+                }
+            }
+            return result;
         } catch (e) {
-            showToast('❌ Failed to save settings');
+            showToast('❌ Failed to apply settings');
+            return {};
+        } finally {
+            if (btn) btn.disabled = false;
         }
+    }
+
+    // Backwards-compatible alias used before starting a session.
+    async function saveSettings() {
+        return applySettings({silent: true, fromStart: true});
     }
 
     async function testOutput() {
@@ -1858,6 +2205,28 @@
         try { await apiFetch('/api/stop', {method: 'POST'}); } catch (err) { showToast('❌ Failed to stop: ' + err.message); }
     }
 
+    // ── Transcript export ─────────────────────────
+    async function exportTranscript(fmt) {
+        const count = document.querySelectorAll('.transcript-entry').length;
+        if (count === 0) { showToast('Nothing to export yet'); return; }
+        try {
+            const res = await apiFetch('/api/transcript/export?format=' + encodeURIComponent(fmt));
+            if (!res.ok) { showToast('❌ Export failed'); return; }
+            const blob = await res.blob();
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = 'transcript.' + fmt;
+            document.body.appendChild(a);
+            a.click();
+            a.remove();
+            URL.revokeObjectURL(url);
+            showToast('⬇ Transcript exported (' + fmt.toUpperCase() + ')');
+        } catch (e) {
+            showToast('❌ Export failed');
+        }
+    }
+
     // ── Health Checks ────────────────────────────
     async function loadHealthChecks() {
         try {
@@ -1869,6 +2238,15 @@
             renderHealthItem('healthApiKeys', checks.api_keys);
             renderHealthItem('healthAudio', checks.audio);
             renderHealthItem('healthNetwork', checks.network);
+
+            const summary = document.getElementById('healthSummary');
+            if (summary) {
+                const failed = Object.values(checks).filter(c => !c.ok).length;
+                summary.textContent = failed === 0
+                    ? '✓ All systems go'
+                    : `${failed} item${failed !== 1 ? 's' : ''} need attention`;
+                summary.style.color = failed === 0 ? 'var(--green)' : 'var(--amber)';
+            }
         } catch (e) {
             console.error('Health check failed:', e);
         }
@@ -1884,11 +2262,9 @@
     }
 
     // ── Live Translation ─────────────────────────
-    let liveMode = false;
-
-    async function startLive() {
-        // Save settings first
-        await saveSettings();
+    async function startLive(opts = {}) {
+        // Persist current settings before starting (unless we're mid-restart).
+        if (!opts.skipApply) await applySettings({silent: true, fromStart: true});
         clearStatusResetTimer();
 
         const body = document.getElementById('transcriptBody');
@@ -1941,19 +2317,21 @@
             statStatus.style.color = 'var(--red)';
             liveStartBtn.style.display = 'none';
             liveStopBtn.style.display = 'inline-flex';
-            liveStatusText.textContent = 'Listening for speech...';
+            liveStatusText.textContent = '🎙️ Listening for speech — change any setting below and it applies live.';
             // Disable file test during live
             document.getElementById('startBtn').disabled = true;
+            liveMode = true;
         } else {
             _origUpdateStatus(status);
             if (status === 'stopped' || status === 'completed' || status === 'error') {
                 liveStartBtn.style.display = 'inline-flex';
                 liveStopBtn.style.display = 'none';
-                liveStatusText.textContent = 'Select your microphone and language above, then start translating.';
+                liveStatusText.textContent = 'Select your microphone and language below, then start translating.';
                 document.getElementById('startBtn').disabled = false;
                 liveMode = false;
             }
         }
+        refreshApplyButton();
     };
 </script>
 

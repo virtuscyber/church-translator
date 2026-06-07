@@ -8,6 +8,8 @@ from typing import Optional
 
 from openai import AsyncOpenAI
 
+from .hallucination import sanitize_transcript
+
 logger = logging.getLogger(__name__)
 
 
@@ -19,38 +21,74 @@ class Translator:
         api_key: str,
         system_prompt: str,
         model: str = "gpt-4o",
-        temperature: float = 0.3,
+        temperature: float = 0.0,
         context_sentences: int = 2,
+        filter_hallucinations: bool = True,
+        source_language: str = "Ukrainian",
+        target_language: str = "English",
+        timeout: float = 30.0,
+        max_retries: int = 2,
     ):
-        self.client = AsyncOpenAI(api_key=api_key)
+        # Client-level timeout + retries give automatic backoff on transient
+        # failures so a single API blip doesn't silently drop a translation.
+        self.client = AsyncOpenAI(api_key=api_key, timeout=timeout, max_retries=max_retries)
         self.system_prompt = system_prompt
         self.model = model
         self.temperature = temperature
+        self.filter_hallucinations = filter_hallucinations
+        self.source_language = source_language
+        self.target_language = target_language
+        # Error string when a translation raises, else None (see Transcriber).
+        self.last_error: Optional[str] = None
         self._context: deque[str] = deque(maxlen=context_sentences)
 
     async def translate(self, ukrainian_text: str) -> Optional[str]:
-        """Translate Ukrainian text to English with biblical tone.
-        
-        Maintains a sliding window of previous translations for context continuity.
-        
+        """Translate source-language text to the target language with biblical tone.
+
+        Maintains a sliding window of previous translations for context
+        continuity. Junk input is rejected up front, and the model's output is
+        filtered for hallucination artifacts before being returned or stored as
+        context — so a single bad chunk cannot poison later translations.
+
         Args:
             ukrainian_text: Ukrainian text to translate.
-            
+
         Returns:
-            English translation with biblical vocabulary, or None on failure.
+            English translation with biblical vocabulary, or None on failure or
+            when the input/output is non-speech.
         """
+        # Don't translate junk — empty strings, stray punctuation, or
+        # hallucination phrases that slipped through STT.
+        clean_input = (
+            sanitize_transcript(ukrainian_text, source="STT")
+            if self.filter_hallucinations
+            else (ukrainian_text or "").strip()
+        )
+        if not clean_input:
+            logger.debug("Translation skipped: empty or non-speech input.")
+            return None
+
+        self.last_error = None
         try:
-            # Build context from previous translations
+            # Provide previous translations purely as reference for continuity.
+            # The system prompt instructs the model never to re-translate or
+            # continue this block.
             context_block = ""
             if self._context:
                 prev = " ".join(self._context)
-                context_block = f"\n\n[Previous translation for context: {prev}]"
+                context_block = (
+                    f"\n\n[Reference only — previously translated, do NOT repeat "
+                    f"or continue: {prev}]"
+                )
 
             messages = [
                 {"role": "system", "content": self.system_prompt},
                 {
                     "role": "user",
-                    "content": f"Translate the following Ukrainian speech to English:{context_block}\n\n{ukrainian_text}",
+                    "content": (
+                        f"Translate the following {self.source_language} speech to "
+                        f"{self.target_language}:{context_block}\n\n{clean_input}"
+                    ),
                 },
             ]
 
@@ -62,17 +100,23 @@ class Translator:
             )
 
             english_text = response.choices[0].message.content.strip()
-            
+
             if not english_text:
                 logger.debug("Empty translation result.")
                 return None
 
-            # Store for context continuity
+            if self.filter_hallucinations:
+                english_text = sanitize_transcript(english_text, source="translation")
+                if not english_text:
+                    return None
+
+            # Store only clean output for context continuity.
             self._context.append(english_text)
 
             logger.info("Translated: %s", english_text[:80] + ("..." if len(english_text) > 80 else ""))
             return english_text
 
         except Exception as e:
+            self.last_error = str(e)
             logger.error("Translation failed: %s", e)
             return None

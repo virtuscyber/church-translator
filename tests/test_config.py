@@ -42,7 +42,7 @@ def test_load_config_parses_yaml_defaults_and_env(monkeypatch, tmp_path):
     assert cfg.audio.input_device == 7
     assert cfg.audio.sample_rate == 48000
     assert cfg.translation.model == "custom-model"
-    assert cfg.translation.temperature == 0.3
+    assert cfg.translation.temperature == 0.0
     assert cfg.synthesis.provider == "openai"
     assert cfg.synthesis.openai.voice == "alloy"
     assert cfg.pipeline.context_sentences == 4
