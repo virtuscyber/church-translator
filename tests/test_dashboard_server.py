@@ -866,3 +866,51 @@ def fake_sounddevice_for_smoke():
         check_output_settings=lambda **k: None,
         default=SimpleNamespace(device=(0, 1)),
     )
+
+
+# ── Live API smoke endpoint ───────────────────────────────────────────
+
+@pytest.mark.asyncio
+async def test_smoke_run_blocked_while_live():
+    from dashboard import server
+    server.state.live_running = True
+    try:
+        resp = await server.api_smoke_run(DummyRequest("/api/smoke/run"))
+        assert resp.status == 409
+    finally:
+        server.state.live_running = False
+
+
+@pytest.mark.asyncio
+async def test_smoke_run_streams_events(monkeypatch):
+    import src.live_smoke
+    from dashboard import server
+
+    events = []
+
+    async def fake_broadcast(msg):
+        events.append(msg)
+
+    async def fake_run_smoke(emit, cfg=None):
+        await emit({"phase": "result", "id": "translation", "label": "OpenAI translation",
+                    "status": "pass", "detail": "ok", "elapsed": 0.1})
+        await emit({"phase": "done", "passed": 1, "failed": 0, "skipped": 7})
+        return {"passed": 1, "failed": 0, "skipped": 7}
+
+    monkeypatch.setattr(server, "broadcast", fake_broadcast)
+    monkeypatch.setattr(src.live_smoke, "run_smoke", fake_run_smoke)
+    server.state.live_running = False
+    server.state.smoke_running = False
+    try:
+        resp = await server.api_smoke_run(DummyRequest("/api/smoke/run"))
+        assert decode_json_response(resp)["started"] is True
+        # let the background task run
+        for _ in range(100):
+            if any(e.get("phase") == "done" for e in events):
+                break
+            await asyncio.sleep(0.01)
+        phases = [e.get("phase") for e in events if e.get("type") == "smoke"]
+        assert "begin" in phases and "done" in phases
+        assert server.state.smoke_running is False  # reset after run
+    finally:
+        server.state.smoke_running = False

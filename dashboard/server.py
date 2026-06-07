@@ -177,6 +177,7 @@ class AppState:
         # Live-tunable runtime knobs (quality/VAD/reliability). Shared with the
         # watchdog so threshold changes take effect without a restart.
         self.live_tuning: dict = {}
+        self.smoke_running: bool = False
         self.audio_monitor_lock = asyncio.Lock()
 
 state = AppState()
@@ -1302,6 +1303,40 @@ async def api_setup_save(request):
     return web.json_response({"ok": True})
 
 
+async def api_smoke_run(request):
+    """Run the opt-in LIVE API smoke checks, streaming results over the
+    WebSocket as ``{"type": "smoke", ...}`` events."""
+    if state.smoke_running:
+        return web.json_response({"ok": False, "error": "Smoke test already running"}, status=409)
+    if state.live_running:
+        return web.json_response(
+            {"ok": False, "error": "Stop live translation before running the API test"},
+            status=409,
+        )
+
+    from dotenv import load_dotenv
+    load_dotenv(PROJECT_ROOT / ".env", override=True)
+
+    async def _run():
+        state.smoke_running = True
+        try:
+            from src.live_smoke import run_smoke
+
+            async def emit(ev):
+                await broadcast({"type": "smoke", **ev})
+
+            await broadcast({"type": "smoke", "phase": "begin"})
+            await run_smoke(emit)
+        except Exception as e:  # noqa: BLE001
+            logger.error("Live smoke test error: %s", e, exc_info=True)
+            await broadcast({"type": "smoke", "phase": "error", "detail": str(e)[:200]})
+        finally:
+            state.smoke_running = False
+
+    asyncio.create_task(_run())
+    return web.json_response({"ok": True, "started": True})
+
+
 # ── File Test Pipeline ──────────────────────────────────────────
 
 async def _run_file_test(file_path: str):
@@ -2373,6 +2408,7 @@ def create_app():
     app.router.add_post("/api/setup/test-openai", api_setup_test_openai)
     app.router.add_post("/api/setup/test-elevenlabs", api_setup_test_elevenlabs)
     app.router.add_post("/api/setup/save", api_setup_save)
+    app.router.add_post("/api/smoke/run", api_smoke_run)
     # Live translation
     app.router.add_post("/api/start-live", api_start_live)
     app.router.add_post("/api/stop-live", api_stop_live)
