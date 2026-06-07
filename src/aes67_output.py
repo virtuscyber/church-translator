@@ -54,6 +54,8 @@ def _build_sdp(
         f"a=ptime:{_AES67_PACKET_TIME_MS}\r\n"
         "a=sendonly\r\n"
         "a=ts-refclk:localmac\r\n"
+        "a=clock-domain:PTPv2 0\r\n"
+        "a=mediaclk:direct=0\r\n"
     )
 
 

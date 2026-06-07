@@ -119,8 +119,12 @@ async def test_devices_endpoint_lists_audio_devices(monkeypatch, fake_sounddevic
 
     assert response.status == 200
     payload = decode_json_response(response)
-    assert payload["input"] == [{"index": 0, "name": "USB Mic", "sample_rate": 48000}]
-    assert payload["output"] == [{"index": 1, "name": "Main Speakers", "sample_rate": 48000}]
+    assert len(payload["input"]) == 1 and len(payload["output"]) == 1
+    mic = payload["input"][0]
+    assert mic["index"] == 0 and mic["name"] == "USB Mic" and mic["sample_rate"] == 48000
+    assert "fingerprint" in mic and mic["remembered"] is False
+    spk = payload["output"][0]
+    assert spk["index"] == 1 and spk["name"] == "Main Speakers" and spk["sample_rate"] == 48000
 
 
 @pytest.mark.asyncio

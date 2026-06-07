@@ -33,6 +33,10 @@ logger = logging.getLogger(__name__)
 
 CONFIG_PATH = PROJECT_ROOT / "config.json"
 
+# Cap retained transcript entries so a multi-hour service doesn't grow memory
+# unbounded (and so WebSocket reconnects don't re-send an ever-larger payload).
+MAX_TRANSCRIPT_ENTRIES = 1000
+
 SUPPORTED_LANGUAGES = [
     {"code": "uk", "name": "Ukrainian"},
     {"code": "ru", "name": "Russian"},
@@ -179,6 +183,13 @@ def _discard_client(ws) -> None:
     """Remove a WebSocket from the client list if it is still present."""
     with contextlib.suppress(ValueError):
         state.connected_clients.remove(ws)
+
+
+def _append_transcript(entry: dict) -> None:
+    """Append a transcript entry, trimming to the retention cap."""
+    state.transcript.append(entry)
+    if len(state.transcript) > MAX_TRANSCRIPT_ENTRIES:
+        del state.transcript[:-MAX_TRANSCRIPT_ENTRIES]
 
 
 async def broadcast(msg: dict):
@@ -429,7 +440,7 @@ async def api_probe_devices(request):
                 )
                 entry["usable"] = True
                 entry["level_db"] = round(peak_db, 1)
-                entry["level_pct"] = max(0, min(100, int((peak_db + 60) / 60 * 100)))
+                entry["level_pct"] = max(0, min(100, round((peak_db + 60) / 60 * 100)))
                 entry["has_signal"] = peak_db > -40
             except Exception as exc:
                 entry["error"] = str(exc)
@@ -637,7 +648,7 @@ async def api_audio_levels(request):
                     continue
 
                 level_db = result
-                pct = max(0, min(100, int((level_db + 60) / 60 * 100)))
+                pct = max(0, min(100, round((level_db + 60) / 60 * 100)))
                 results.append({
                     "index": dev["index"],
                     "name": dev["name"],
@@ -698,7 +709,7 @@ async def api_audio_level_single(request):
 
         async with state.audio_monitor_lock:
             peak_db, rms_db = await loop.run_in_executor(None, _sample)
-        pct = max(0, min(100, int((peak_db + 60) / 60 * 100)))
+        pct = max(0, min(100, round((peak_db + 60) / 60 * 100)))
 
         return web.json_response({
             "index": dev_index,
@@ -1085,7 +1096,7 @@ async def _run_file_test(file_path: str):
                 "ukrainian": src_text,
                 "english": tgt_text,
             }
-            state.transcript.append(entry)
+            _append_transcript(entry)
 
             await broadcast({
                 "type": "translation",
@@ -1472,7 +1483,7 @@ async def _run_live_pipeline():
                     "ukrainian": src_text,
                     "english": tgt_text,
                 }
-                state.transcript.append(entry)
+                _append_transcript(entry)
 
                 await broadcast({
                     "type": "translation",
@@ -1821,7 +1832,18 @@ def create_app():
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
     port = int(os.getenv("DASHBOARD_PORT", "8085"))
-    app = create_app()
-    logger.info("Dashboard starting on http://localhost:%d", port)
     host = os.getenv("DASHBOARD_HOST", "127.0.0.1")
+
+    # Security: if we're reachable beyond localhost without an API key, anyone
+    # on the network can start/stop translation and read settings. Warn loudly.
+    if host not in ("127.0.0.1", "localhost", "::1") and not DASHBOARD_API_KEY:
+        logger.warning(
+            "⚠️  Dashboard is bound to %s with NO DASHBOARD_API_KEY set — it is "
+            "reachable UNAUTHENTICATED on your network. Set DASHBOARD_API_KEY in "
+            ".env, or bind to 127.0.0.1, before using this in production.",
+            host,
+        )
+
+    app = create_app()
+    logger.info("Dashboard starting on http://%s:%d", host, port)
     web.run_app(app, host=host, port=port)

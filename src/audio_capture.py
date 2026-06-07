@@ -99,8 +99,10 @@ class AudioCapture:
 
     def _pcm_to_wav(self, audio: np.ndarray) -> bytes:
         """Convert float32 PCM numpy array to WAV bytes."""
-        # Convert float32 [-1, 1] to int16
-        pcm_int16 = (audio * 32767).astype(np.int16)
+        # Convert float32 [-1, 1] to int16, clipping out-of-range samples so a
+        # hot mic (values beyond ±1.0) distorts gracefully instead of wrapping
+        # around into harsh noise.
+        pcm_int16 = np.clip(audio * 32767.0, -32767, 32767).astype(np.int16)
         
         buf = io.BytesIO()
         # WAV header
