@@ -147,3 +147,42 @@ async def test_vad_capture_restart_reopens_stream(monkeypatch):
 
     await cap.restart()
     assert opened["count"] == 2  # stream re-opened
+
+
+# ── STT language anchoring (Ukrainian, not Polish/Russian) ────────────
+
+def test_transcriber_derives_ukrainian_anchor_prompt():
+    from src.transcriber import Transcriber, stt_anchor_prompt
+
+    t = Transcriber(api_key="x", language="uk")
+    assert t.language == "uk"
+    assert t.prompt and "українською" in t.prompt
+    assert stt_anchor_prompt("UK") == stt_anchor_prompt("uk")  # case-insensitive
+    assert stt_anchor_prompt("xx") is None  # unknown language -> no prompt
+
+
+def test_explicit_prompt_overrides_language_anchor():
+    from src.transcriber import Transcriber
+
+    t = Transcriber(api_key="x", language="uk", prompt="custom church terms")
+    assert t.prompt == "custom church terms"
+
+
+@pytest.mark.asyncio
+async def test_transcribe_passes_language_and_prompt_to_api():
+    from src.transcriber import Transcriber
+
+    t = Transcriber(api_key="x", language="uk", gate_silence=False)
+    captured = {}
+
+    async def fake_create(**kwargs):
+        captured.update(kwargs)
+        return "Слава Богу"
+
+    t.client = MagicMock()
+    t.client.audio.transcriptions.create = AsyncMock(side_effect=fake_create)
+
+    out = await t.transcribe(b"fake-wav-bytes")
+    assert out == "Слава Богу"
+    assert captured["language"] == "uk"
+    assert "українською" in captured["prompt"]  # Ukrainian anchor reached the API
