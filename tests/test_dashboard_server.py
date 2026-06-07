@@ -789,3 +789,27 @@ def test_apply_deepgram_and_elevenlabs_model_hot_swap():
         assert "Deepgram model" in applied and "ElevenLabs STT model" in applied
     finally:
         server.state.live_transcriber = None
+
+
+@pytest.mark.asyncio
+async def test_setup_save_clickthrough_preserves_existing_keys(monkeypatch, tmp_path):
+    """Wizard click-through (all keys blank) must not clobber or write blanks."""
+    import os
+    from dashboard import server
+
+    monkeypatch.setattr(server, "PROJECT_ROOT", tmp_path)
+    monkeypatch.setattr(server, "CONFIG_PATH", tmp_path / "config.json")
+    (tmp_path / ".env").write_text("OPENAI_API_KEY=sk-existing\n")
+    monkeypatch.delenv("DEEPGRAM_API_KEY", raising=False)
+    try:
+        resp = await server.api_setup_save(DummyRequest("/api/setup/save", data={
+            "openai_api_key": "", "elevenlabs_api_key": "", "deepgram_api_key": "",
+            "source_language": "uk", "target_language": "en",
+        }))
+        assert decode_json_response(resp) == {"ok": True}
+        env = (tmp_path / ".env").read_text()
+        assert "OPENAI_API_KEY=sk-existing" in env   # preserved
+        assert "DEEPGRAM_API_KEY" not in env          # blank not written
+        assert "DEEPGRAM_API_KEY" not in os.environ
+    finally:
+        os.environ.pop("DEEPGRAM_API_KEY", None)
