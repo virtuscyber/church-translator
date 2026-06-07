@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import io
 import wave
 from unittest.mock import AsyncMock, MagicMock
@@ -379,3 +380,29 @@ async def test_transcribe_deepgram_builds_correct_request(monkeypatch):
     assert captured["params"]["model"] == "nova-3"
     assert captured["params"]["language"] == "uk"
     assert captured["data"] == b"wav-bytes"
+
+
+# ── Streaming: raw PCM tap on VADAudioCapture ─────────────────────────
+
+@pytest.mark.asyncio
+async def test_vad_capture_raw_listener_forwards_pcm(monkeypatch):
+    import numpy as np
+    import src.vad_capture as vc
+
+    cap = vc.VADAudioCapture(device=0, sample_rate=48000)
+    cap._loop = asyncio.get_running_loop()
+
+    received = []
+    cap.set_raw_listener(received.append)
+
+    # Simulate a sounddevice callback with a half-scale tone.
+    frames = np.full((16, 1), 0.5, dtype=np.float32)
+    cap._audio_callback(frames, 16, None, None)
+    await asyncio.sleep(0)  # let call_soon_threadsafe run
+
+    assert len(received) == 1
+    pcm = np.frombuffer(received[0], dtype="<i2")
+    assert len(pcm) == 16
+    assert abs(int(pcm[0]) - int(0.5 * 32767)) <= 1  # float32 -> int16 LE
+    # With a raw listener set, the VAD chunker must NOT also emit chunks.
+    assert cap._chunk_queue.qsize() == 0

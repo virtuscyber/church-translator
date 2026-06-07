@@ -65,6 +65,15 @@ class VADAudioCapture:
         # stream fires continuously (even in silence), so a stale value means
         # the device has stalled or been unplugged.
         self._last_frame_monotonic: float = 0.0
+        # Optional raw-PCM tap for true-streaming STT. When set, the callback
+        # forwards int16-LE mono frames to it (on the event loop) and skips the
+        # VAD chunker entirely — the streaming provider does its own endpointing.
+        self._raw_listener: Optional[callable] = None
+
+    def set_raw_listener(self, callback) -> None:
+        """Forward raw int16-LE mono PCM frames to ``callback`` instead of
+        emitting VAD-bounded chunks. Pass ``None`` to restore chunking."""
+        self._raw_listener = callback
 
     def _audio_callback(self, indata: np.ndarray, frames: int, time_info, status):
         """Called from audio thread — feed to VAD chunker."""
@@ -75,6 +84,17 @@ class VADAudioCapture:
 
         # VAD chunker expects mono float32
         audio = indata[:, 0] if indata.ndim > 1 else indata.flatten()
+
+        # Streaming mode: forward raw int16 PCM to the listener (on the loop)
+        # and bypass the VAD chunker.
+        if self._raw_listener is not None:
+            pcm16 = (np.clip(audio, -1.0, 1.0) * 32767.0).astype("<i2").tobytes()
+            if self._loop:
+                try:
+                    self._loop.call_soon_threadsafe(self._raw_listener, pcm16)
+                except RuntimeError:
+                    logger.debug("Event loop closed before raw PCM frame could be delivered")
+            return
 
         with self._chunker_lock:
             tagged_chunks = self._chunker.feed(audio)

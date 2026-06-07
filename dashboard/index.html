@@ -742,6 +742,9 @@
                 <button class="btn btn-secondary btn-sm" onclick="exportTranscript('srt')" title="Download transcript as subtitles">⬇ SRT</button>
             </div>
         </div>
+        <div id="livePartial" style="display:none;padding:8px 14px;color:var(--text-dim);font-style:italic;border-bottom:1px dashed var(--border);">
+            <span style="color:var(--accent);font-style:normal;">⚡ </span><span id="livePartialText"></span>
+        </div>
         <div class="transcript-body" id="transcriptBody">
             <div class="transcript-empty" id="transcriptEmpty">
                 <div class="icon">🎤</div>
@@ -842,6 +845,7 @@
                     <option value="openai">OpenAI (gpt-4o-transcribe / Whisper)</option>
                 </select>
                 <div class="model-note" style="font-size:0.75em;color:var(--text-dim);margin-top:2px;">Scribe v2 has the lowest Ukrainian error rate; Deepgram Nova-3 is a fast alternative. The OpenAI model below is used when provider = OpenAI (and as automatic fallback).</div>
+                <label style="margin-top:6px;font-size:0.85em;"><input type="checkbox" id="sttStreaming"> ⚡ True streaming (Deepgram only — words flow in live; applies on restart)</label>
             </div>
             <div class="form-group">
                 <label>🧠 OpenAI STT Model</label>
@@ -1193,7 +1197,7 @@
 
     const SETTINGS_FIELD_IDS = [
         'inputDevice', 'outputDevice', 'sourceLang', 'targetLang',
-        'sttProvider', 'sttModel', 'translationModel', 'ttsModel', 'voiceSelect', 'customVocab',
+        'sttProvider', 'sttStreaming', 'sttModel', 'translationModel', 'ttsModel', 'voiceSelect', 'customVocab',
         // Advanced live-tuning fields
         'tuneGateSilence', 'tuneSilencePeak', 'tuneMinDuration', 'tuneFilterHalluc',
         'tuneSttTemp', 'tuneTransTemp', 'tuneTtsSpeed', 'tuneVadAggr', 'tuneMinChunk', 'tuneMaxChunk',
@@ -1756,6 +1760,7 @@
                 custom_vocabulary: document.getElementById('customVocab').value,
                 elevenlabs_voice_id: document.getElementById('voiceSelect').value || null,
                 stt_provider: document.getElementById('sttProvider').value,
+                stt_streaming: document.getElementById('sttStreaming').checked,
                 stt_model: document.getElementById('sttModel').value,
                 translation_model: document.getElementById('translationModel').value,
                 tts_model: document.getElementById('ttsModel').value,
@@ -1789,6 +1794,7 @@
             setNum('tuneMaxRetries', t.max_retries);
             setNum('tuneWatchdog', t.mic_watchdog_sec);
             if (g('sttProvider') && t.stt_provider) g('sttProvider').value = t.stt_provider;
+            if (g('sttStreaming')) g('sttStreaming').checked = t.stt_streaming !== false;
             if (g('tuneOutputMode')) g('tuneOutputMode').value = t.output_mode || 'sounddevice';
             if (g('tuneStreamName')) g('tuneStreamName').value = t.aes67_stream_name || '';
             if (g('tuneMulticast')) g('tuneMulticast').value = t.aes67_multicast || '';
@@ -2066,7 +2072,11 @@
                 }
                 document.getElementById('statStatus').style.color = 'var(--accent)';
                 break;
+            case 'partial':
+                showPartial(msg.text);
+                break;
             case 'translation':
+                showPartial('');  // utterance finalized — clear the live preview
                 addTranscriptEntry(msg.entry);
                 updateProgress(msg.progress);
                 if (msg.stats) updateStats(msg.stats);
@@ -2078,6 +2088,20 @@
             case 'info':
                 showToast('ℹ️ ' + msg.message);
                 break;
+        }
+    }
+
+    // Live interim transcript (streaming STT only).
+    function showPartial(text) {
+        const box = document.getElementById('livePartial');
+        const span = document.getElementById('livePartialText');
+        if (!box || !span) return;
+        if (text && text.trim()) {
+            span.textContent = text;
+            box.style.display = 'block';
+        } else {
+            box.style.display = 'none';
+            span.textContent = '';
         }
     }
 
