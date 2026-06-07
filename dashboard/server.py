@@ -2376,4 +2376,16 @@ if __name__ == "__main__":
 
     app = create_app()
     logger.info("Dashboard starting on http://%s:%d", host, port)
-    web.run_app(app, host=host, port=port)
+    try:
+        web.run_app(app, host=host, port=port, print=None)
+    except OSError as e:
+        # errno 10048 (Windows) / 98 (Linux/EADDRINUSE) = port already in use.
+        if e.errno in (48, 98, 10048):
+            logger.error(
+                "Port %d is already in use — another copy of the dashboard may "
+                "already be running. Open http://localhost:%d, or set "
+                "DASHBOARD_PORT to a free port and restart.",
+                port, port,
+            )
+            sys.exit(1)
+        raise
