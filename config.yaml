@@ -12,8 +12,10 @@ transcription:
                               #   automatic fallback if the primary fails.
   elevenlabs_model: "scribe_v2"
   deepgram_model: "nova-3"
-  streaming: true             # true-streaming WebSocket path (Deepgram only);
-                              #   other providers always use VAD chunking
+  elevenlabs_realtime_model: "scribe_v2_realtime"  # streaming (provider=elevenlabs)
+  openai_realtime_model: "gpt-realtime-whisper"    # streaming (provider=openai)
+  streaming: true             # true-streaming WebSocket path; supported by
+                              #   deepgram / elevenlabs / openai providers
   model: "gpt-4o-transcribe"  # used when provider = openai (and as fallback)
   language: "uk"              # Ukrainian (ISO 639-1)
   temperature: 0.0            # 0 = deterministic; reduces STT hallucination

@@ -1701,15 +1701,21 @@ async def _run_live_pipeline():
             "aes67_ttl": config.output.ttl,
         }
 
-        # True-streaming STT (Deepgram WebSocket) is used when the Deepgram
-        # provider is selected with streaming enabled and a key present;
-        # otherwise the proven VAD-chunk path runs. The raw-PCM tap must be set
-        # before the stream opens, so we wire a forwarder now and attach the
-        # streaming transcriber (built further down) via this holder.
+        # True-streaming STT is used when a streaming-capable provider is
+        # selected with streaming enabled and its key present; otherwise the
+        # proven VAD-chunk path runs. The raw-PCM tap must be set before the
+        # stream opens, so we wire a forwarder now and attach the streaming
+        # transcriber (built further down) via this holder.
+        from src.streaming_stt import STREAMING_PROVIDERS
+        _provider_keys = {
+            "deepgram": config.deepgram_api_key,
+            "elevenlabs": config.elevenlabs_api_key,
+            "openai": config.openai_api_key,
+        }
         streaming_enabled = (
-            config.transcription.provider == "deepgram"
-            and getattr(config.transcription, "streaming", False)
-            and bool(config.deepgram_api_key)
+            getattr(config.transcription, "streaming", False)
+            and config.transcription.provider in STREAMING_PROVIDERS
+            and bool(_provider_keys.get(config.transcription.provider))
         )
         stream_holder = {"stt": None}
         if streaming_enabled:
@@ -1945,10 +1951,22 @@ async def _run_live_pipeline():
                 await slot.put(None)
 
         async def _run_streaming_source():
-            """True-streaming live path: continuous PCM → Deepgram WS → per-
-            utterance translate/TTS. Interim transcripts drive an on-screen
+            """True-streaming live path: continuous PCM → provider WebSocket →
+            per-utterance translate/TTS. Interim transcripts drive an on-screen
             preview; finals flow through the shared ordered-playback machinery."""
-            from src.streaming_stt import DeepgramStreamingTranscriber
+            from src.streaming_stt import make_streaming_transcriber
+
+            provider = config.transcription.provider
+            stream_key = {
+                "deepgram": config.deepgram_api_key,
+                "elevenlabs": config.elevenlabs_api_key,
+                "openai": config.openai_api_key,
+            }[provider]
+            stream_model = {
+                "deepgram": config.transcription.deepgram_model,
+                "elevenlabs": config.transcription.elevenlabs_realtime_model,
+                "openai": config.transcription.openai_realtime_model,
+            }[provider]
 
             utt = {"seq": 0}
             interim = {"last": 0.0}
@@ -1983,12 +2001,12 @@ async def _run_live_pipeline():
                 task.add_done_callback(processing_tasks.discard)
                 task.add_done_callback(_log_live_chunk_result)
 
-            stt = DeepgramStreamingTranscriber(
-                config.deepgram_api_key,
-                model=config.transcription.deepgram_model,
+            stt = make_streaming_transcriber(
+                provider,
+                api_key=stream_key,
+                model=stream_model,
                 language=src_lang,
                 sample_rate=config.audio.sample_rate,
-                channels=config.audio.channels,
                 filter_hallucinations=config.transcription.filter_hallucinations,
                 on_interim=on_interim,
                 on_final=on_final,
@@ -1997,7 +2015,7 @@ async def _run_live_pipeline():
             stt_task = asyncio.create_task(stt.run())
             await broadcast({
                 "type": "info",
-                "message": f"Streaming STT active (Deepgram {config.transcription.deepgram_model}).",
+                "message": f"Streaming STT active ({provider} {stream_model}).",
             })
             try:
                 reported = ""

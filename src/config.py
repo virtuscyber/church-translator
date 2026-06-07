@@ -28,8 +28,11 @@ class TranscriptionConfig:
     model: str = "gpt-4o-transcribe"  # OpenAI STT model
     elevenlabs_model: str = "scribe_v2"  # ElevenLabs STT model id
     deepgram_model: str = "nova-3"    # Deepgram STT model
+    elevenlabs_realtime_model: str = "scribe_v2_realtime"  # ElevenLabs streaming model
+    openai_realtime_model: str = "gpt-realtime-whisper"    # OpenAI streaming model
     streaming: bool = True            # Use the true-streaming WebSocket path when
-                                       #   the provider supports it (Deepgram).
+                                       #   the provider supports it (Deepgram /
+                                       #   ElevenLabs Realtime / OpenAI Realtime).
     language: str = "uk"
     temperature: float = 0.0          # 0 = deterministic, least hallucination
     gate_silence: bool = True         # Skip near-silent chunks before STT
