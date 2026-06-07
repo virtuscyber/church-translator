@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import io
 import wave
 from unittest.mock import AsyncMock, MagicMock
@@ -297,3 +298,111 @@ async def test_transcribe_elevenlabs_builds_correct_request(monkeypatch):
     # model_id + language_code were added to the multipart form
     field_names = {f[0].get("name") for f in captured["data"]._fields}
     assert "model_id" in field_names and "language_code" in field_names and "file" in field_names
+
+
+# ── Deepgram Nova-3 STT provider ──────────────────────────────────────
+
+@pytest.mark.asyncio
+async def test_transcriber_uses_deepgram_when_provider_set():
+    from src.transcriber import Transcriber
+
+    t = Transcriber(api_key="x", provider="deepgram", deepgram_api_key="d", gate_silence=False)
+
+    async def fake_dg(_wav):
+        return "Слава Богу"
+
+    t._transcribe_deepgram = fake_dg
+    t._transcribe_openai = AsyncMock(side_effect=AssertionError("OpenAI should not be called"))
+
+    out = await t.transcribe(b"wav")
+    assert out == "Слава Богу"
+    assert t.last_error is None
+
+
+@pytest.mark.asyncio
+async def test_transcriber_deepgram_falls_back_to_openai():
+    from src.transcriber import Transcriber
+
+    t = Transcriber(api_key="x", provider="deepgram", deepgram_api_key="d", gate_silence=False)
+
+    async def boom(_wav):
+        raise RuntimeError("deepgram 503")
+
+    async def ok(_wav):
+        return "fallback"
+
+    t._transcribe_deepgram = boom
+    t._transcribe_openai = ok
+
+    out = await t.transcribe(b"wav")
+    assert out == "fallback"
+    assert t.last_error is None
+
+
+@pytest.mark.asyncio
+async def test_transcribe_deepgram_builds_correct_request(monkeypatch):
+    import aiohttp
+    from src.transcriber import Transcriber
+
+    captured = {}
+
+    class FakeResp:
+        status = 200
+        async def text(self):
+            return ""
+        async def json(self):
+            return {"results": {"channels": [{"alternatives": [{"transcript": "Слава Богу"}]}]}}
+        async def __aenter__(self):
+            return self
+        async def __aexit__(self, *a):
+            return False
+
+    class FakeSession:
+        def __init__(self, *a, **k):
+            pass
+        async def __aenter__(self):
+            return self
+        async def __aexit__(self, *a):
+            return False
+        def post(self, url, params=None, data=None, headers=None):
+            captured.update(url=url, params=params, data=data, headers=headers)
+            return FakeResp()
+
+    monkeypatch.setattr(aiohttp, "ClientSession", FakeSession)
+
+    t = Transcriber(api_key="x", provider="deepgram", deepgram_api_key="DG_KEY",
+                    deepgram_model="nova-3", language="uk", gate_silence=False)
+    out = await t.transcribe(b"wav-bytes")
+
+    assert out == "Слава Богу"
+    assert captured["url"] == "https://api.deepgram.com/v1/listen"
+    assert captured["headers"]["Authorization"] == "Token DG_KEY"
+    assert captured["params"]["model"] == "nova-3"
+    assert captured["params"]["language"] == "uk"
+    assert captured["data"] == b"wav-bytes"
+
+
+# ── Streaming: raw PCM tap on VADAudioCapture ─────────────────────────
+
+@pytest.mark.asyncio
+async def test_vad_capture_raw_listener_forwards_pcm(monkeypatch):
+    import numpy as np
+    import src.vad_capture as vc
+
+    cap = vc.VADAudioCapture(device=0, sample_rate=48000)
+    cap._loop = asyncio.get_running_loop()
+
+    received = []
+    cap.set_raw_listener(received.append)
+
+    # Simulate a sounddevice callback with a half-scale tone.
+    frames = np.full((16, 1), 0.5, dtype=np.float32)
+    cap._audio_callback(frames, 16, None, None)
+    await asyncio.sleep(0)  # let call_soon_threadsafe run
+
+    assert len(received) == 1
+    pcm = np.frombuffer(received[0], dtype="<i2")
+    assert len(pcm) == 16
+    assert abs(int(pcm[0]) - int(0.5 * 32767)) <= 1  # float32 -> int16 LE
+    # With a raw listener set, the VAD chunker must NOT also emit chunks.
+    assert cap._chunk_queue.qsize() == 0

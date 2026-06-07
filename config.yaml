@@ -7,9 +7,13 @@ audio:
 
 transcription:
   provider: "elevenlabs"      # "elevenlabs" = Scribe v2 (best Ukrainian WER);
+                              #   "deepgram" = Nova-3 (needs DEEPGRAM_API_KEY);
                               #   "openai" = gpt-4o-transcribe. OpenAI is the
                               #   automatic fallback if the primary fails.
   elevenlabs_model: "scribe_v2"
+  deepgram_model: "nova-3"
+  streaming: true             # true-streaming WebSocket path (Deepgram only);
+                              #   other providers always use VAD chunking
   model: "gpt-4o-transcribe"  # used when provider = openai (and as fallback)
   language: "uk"              # Ukrainian (ISO 639-1)
   temperature: 0.0            # 0 = deterministic; reduces STT hallucination

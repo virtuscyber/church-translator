@@ -796,7 +796,7 @@ async def api_save_config(request):
     """Save device/language config."""
     data = await request.json()
     # Only allow safe keys
-    allowed = {"input_device", "output_device", "source_language", "target_language", "custom_vocabulary", "elevenlabs_voice_id", "stt_model", "stt_provider", "translation_model", "tts_model", "preferred_input_fingerprint", "preferred_output_fingerprint"} | _TUNING_KEYS | _AES67_KEYS
+    allowed = {"input_device", "output_device", "source_language", "target_language", "custom_vocabulary", "elevenlabs_voice_id", "stt_model", "stt_provider", "stt_streaming", "translation_model", "tts_model", "preferred_input_fingerprint", "preferred_output_fingerprint"} | _TUNING_KEYS | _AES67_KEYS
     filtered = {k: v for k, v in _coerce_tuning(data).items() if k in allowed}
     save_config(filtered)
     return web.json_response({"ok": True})
@@ -883,6 +883,7 @@ def _effective_tuning() -> dict:
         "translation_temperature": cfg.translation.temperature,
         "tts_speed": cfg.synthesis.speed,
         "stt_provider": cfg.transcription.provider,
+        "stt_streaming": cfg.transcription.streaming,
         "api_timeout": 30.0,
         "max_retries": 2,
         "mic_watchdog_sec": 6.0,
@@ -897,7 +898,7 @@ def _effective_tuning() -> dict:
         "aes67_ttl": cfg.output.ttl,
     }
     saved = load_saved_config()
-    for key in _TUNING_KEYS | _AES67_KEYS | {"stt_provider"}:
+    for key in _TUNING_KEYS | _AES67_KEYS | {"stt_provider", "stt_streaming"}:
         if key in saved and saved[key] is not None:
             defaults[key] = saved[key]
     return defaults
@@ -1086,7 +1087,7 @@ async def api_apply(request):
         return web.json_response({"ok": False, "error": "Invalid JSON body"}, status=400)
 
     allowed = _HOT_APPLY_KEYS | _DEVICE_KEYS | _TUNING_KEYS | _AES67_KEYS | {
-        "preferred_input_fingerprint", "preferred_output_fingerprint",
+        "preferred_input_fingerprint", "preferred_output_fingerprint", "stt_streaming",
     }
     # Coerce/clamp numeric tuning values before persisting or applying.
     data = _coerce_tuning(data)
@@ -1566,6 +1567,8 @@ async def _run_live_pipeline():
         saved_stt_provider = saved.get("stt_provider")
         if saved_stt_provider:
             config.transcription.provider = saved_stt_provider
+        if "stt_streaming" in saved and saved["stt_streaming"] is not None:
+            config.transcription.streaming = bool(saved["stt_streaming"])
 
         # Apply saved live-tuning overrides (quality / VAD / reliability / AES67)
         # onto the config so the components below pick them up at construction.
@@ -1618,6 +1621,8 @@ async def _run_live_pipeline():
             provider=config.transcription.provider,
             elevenlabs_api_key=config.elevenlabs_api_key,
             elevenlabs_model=config.transcription.elevenlabs_model,
+            deepgram_api_key=config.deepgram_api_key,
+            deepgram_model=config.transcription.deepgram_model,
         )
 
         system_prompt = _build_translation_prompt(config.translation.system_prompt, custom_vocab)
@@ -1695,6 +1700,24 @@ async def _run_live_pipeline():
             "aes67_port": config.output.port,
             "aes67_ttl": config.output.ttl,
         }
+
+        # True-streaming STT (Deepgram WebSocket) is used when the Deepgram
+        # provider is selected with streaming enabled and a key present;
+        # otherwise the proven VAD-chunk path runs. The raw-PCM tap must be set
+        # before the stream opens, so we wire a forwarder now and attach the
+        # streaming transcriber (built further down) via this holder.
+        streaming_enabled = (
+            config.transcription.provider == "deepgram"
+            and getattr(config.transcription, "streaming", False)
+            and bool(config.deepgram_api_key)
+        )
+        stream_holder = {"stt": None}
+        if streaming_enabled:
+            def _raw_forward(pcm):
+                s = stream_holder["stt"]
+                if s is not None:
+                    s.feed(pcm)
+            capture.set_raw_listener(_raw_forward)
 
         await capture.start()
         await broadcast({"type": "info", "message": "Microphone active — listening for speech..."})
@@ -1832,14 +1855,70 @@ async def _run_live_pipeline():
 
         watchdog_task = asyncio.create_task(_device_watchdog())
 
-        async def _process_chunk(wav_bytes, seq, pre_transcribed=None):
-            """Process a single chunk: STT → Translate → TTS → slot.
-            
-            Runs concurrently with other chunks. STT and translation happen
-            in parallel across chunks, but TTS audio is routed to a per-chunk
-            slot that the playback worker drains in order.
+        async def _emit_translation(src_text, seq, slot, t0):
+            """Translate ``src_text`` → stream TTS into the given playback slot.
+
+            Shared by both the chunk pipeline and the streaming pipeline. The
+            caller owns the slot lifecycle (reservation + end marker); this just
+            fills it with audio in order.
             """
             nonlocal total_latency
+
+            await broadcast({"type": "stt", "seq": seq, "total": 0, "text": src_text})
+
+            tgt_text = await asyncio.wait_for(translator.translate(src_text), timeout=20.0)
+            if not tgt_text:
+                if getattr(translator, "last_error", None):
+                    await report_api_error("Translation", translator.last_error)
+                return
+
+            latency = time.time() - t0
+            total_latency += latency
+            state.stats["chunks_processed"] = seq
+            state.stats["avg_latency"] = total_latency / seq
+
+            entry = {
+                "seq": seq,
+                "source": src_text,
+                "translated": tgt_text,
+                "source_lang": src_lang,
+                "target_lang": tgt_lang,
+                "latency": round(latency, 1),
+                "timestamp": time.time(),
+                "ukrainian": src_text,
+                "english": tgt_text,
+            }
+            _append_transcript(entry)
+
+            await broadcast({
+                "type": "translation",
+                "entry": entry,
+                "progress": 0,
+                "stats": {
+                    "chunks_processed": seq,
+                    "total_chunks": 0,
+                    "avg_latency": round(state.stats["avg_latency"], 1),
+                },
+            })
+
+            # TTS — stream chunks into our slot; playback worker drains in order.
+            tts_started = False
+            async for audio_chunk in synthesizer.synthesize_stream(tgt_text):
+                if not tts_started:
+                    logger.info("[%d] TTS first audio in %.2fs", seq, time.time() - t0 - latency)
+                    tts_started = True
+                await slot.put(audio_chunk)
+
+            if not tts_started and getattr(synthesizer, "last_error", None):
+                await report_api_error("Voice synthesis", synthesizer.last_error)
+
+        async def _process_chunk(wav_bytes, seq, pre_transcribed=None):
+            """Chunk path: STT (or speculative result) → ordered translation.
+
+            Runs concurrently with other chunks. The playback slot is reserved
+            before STT so an empty/failed chunk still advances the ordered
+            playback worker via its end marker.
+            """
             t0 = time.time()
 
             # Reserve our playback slot FIRST so ordering is guaranteed
@@ -1848,7 +1927,6 @@ async def _run_live_pipeline():
             next_slot_ready.set()  # Wake playback worker if waiting
 
             try:
-                # STT — use speculative result if available
                 if pre_transcribed is not None:
                     src_text = pre_transcribed
                     logger.info("[Chunk %d] Using speculative STT result", seq)
@@ -1858,70 +1936,82 @@ async def _run_live_pipeline():
                     if getattr(transcriber, "last_error", None):
                         await report_api_error("Speech-to-text", transcriber.last_error)
                     return
-
-                await broadcast({
-                    "type": "stt",
-                    "seq": seq,
-                    "total": 0,
-                    "text": src_text,
-                })
-
-                # Translate
-                tgt_text = await asyncio.wait_for(translator.translate(src_text), timeout=20.0)
-                if not tgt_text:
-                    if getattr(translator, "last_error", None):
-                        await report_api_error("Translation", translator.last_error)
-                    return
-
-                latency = time.time() - t0
-                total_latency += latency
-                state.stats["chunks_processed"] = seq
-                state.stats["avg_latency"] = total_latency / seq
-
-                entry = {
-                    "seq": seq,
-                    "source": src_text,
-                    "translated": tgt_text,
-                    "source_lang": src_lang,
-                    "target_lang": tgt_lang,
-                    "latency": round(latency, 1),
-                    "timestamp": time.time(),
-                    "ukrainian": src_text,
-                    "english": tgt_text,
-                }
-                _append_transcript(entry)
-
-                await broadcast({
-                    "type": "translation",
-                    "entry": entry,
-                    "progress": 0,
-                    "stats": {
-                        "chunks_processed": seq,
-                        "total_chunks": 0,
-                        "avg_latency": round(state.stats["avg_latency"], 1),
-                    },
-                })
-
-                # TTS — stream chunks into our slot
-                # Playback worker will drain this slot when it's our turn
-                tts_started = False
-                async for audio_chunk in synthesizer.synthesize_stream(tgt_text):
-                    if not tts_started:
-                        tts_time_to_first = time.time() - t0 - latency
-                        logger.info("[Chunk %d] TTS first audio in %.2fs", seq, tts_time_to_first)
-                        tts_started = True
-                    await slot.put(audio_chunk)
-
-                if not tts_started and getattr(synthesizer, "last_error", None):
-                    await report_api_error("Voice synthesis", synthesizer.last_error)
-
+                await _emit_translation(src_text, seq, slot, t0)
             except asyncio.TimeoutError as exc:
                 logger.warning("[Chunk %d] Processing timed out: %s", seq, exc)
                 return
-
             finally:
                 # Always send end marker so playback worker advances
                 await slot.put(None)
+
+        async def _run_streaming_source():
+            """True-streaming live path: continuous PCM → Deepgram WS → per-
+            utterance translate/TTS. Interim transcripts drive an on-screen
+            preview; finals flow through the shared ordered-playback machinery."""
+            from src.streaming_stt import DeepgramStreamingTranscriber
+
+            utt = {"seq": 0}
+            interim = {"last": 0.0}
+
+            def on_interim(text):
+                now = time.monotonic()
+                if now - interim["last"] < 0.2:  # throttle the live preview
+                    return
+                interim["last"] = now
+                asyncio.create_task(broadcast({"type": "partial", "text": text}))
+
+            def on_final(text):
+                utt["seq"] += 1
+                seq = utt["seq"]
+                slot = asyncio.Queue()
+                playback_slots[seq] = slot
+                next_slot_ready.set()
+
+                async def _run():
+                    t0 = time.time()
+                    try:
+                        await _emit_translation(text, seq, slot, t0)
+                    except asyncio.TimeoutError:
+                        logger.warning("[Utt %d] processing timed out", seq)
+                    except Exception as e:  # noqa: BLE001
+                        logger.error("[Utt %d] processing error: %s", seq, e)
+                    finally:
+                        await slot.put(None)
+
+                task = asyncio.create_task(_run())
+                processing_tasks.add(task)
+                task.add_done_callback(processing_tasks.discard)
+                task.add_done_callback(_log_live_chunk_result)
+
+            stt = DeepgramStreamingTranscriber(
+                config.deepgram_api_key,
+                model=config.transcription.deepgram_model,
+                language=src_lang,
+                sample_rate=config.audio.sample_rate,
+                channels=config.audio.channels,
+                filter_hallucinations=config.transcription.filter_hallucinations,
+                on_interim=on_interim,
+                on_final=on_final,
+            )
+            stream_holder["stt"] = stt  # start receiving the raw PCM tap
+            stt_task = asyncio.create_task(stt.run())
+            await broadcast({
+                "type": "info",
+                "message": f"Streaming STT active (Deepgram {config.transcription.deepgram_model}).",
+            })
+            try:
+                reported = ""
+                while state.live_running:
+                    await asyncio.sleep(0.3)
+                    # Surface a sustained connection failure to the operator.
+                    if stt.last_error and stt.last_error != reported:
+                        reported = stt.last_error
+                        await report_api_error("Streaming STT", stt.last_error)
+            finally:
+                stream_holder["stt"] = None
+                await stt.stop()
+                with contextlib.suppress(asyncio.CancelledError, Exception):
+                    await asyncio.wait_for(stt_task, timeout=3.0)
 
         # Main loop with speculative STT:
         # 1. When VAD emits a "preview", start STT speculatively
@@ -1945,7 +2035,11 @@ async def _run_live_pipeline():
                 logger.warning("Speculative STT failed: %s", e)
                 speculative_stt_result = None
 
-        while state.live_running:
+        if streaming_enabled:
+            # True-streaming engine — bypasses the VAD-chunk loop entirely.
+            await _run_streaming_source()
+
+        while state.live_running and not streaming_enabled:
             try:
                 tagged = await capture.get_chunk()
             except Exception:

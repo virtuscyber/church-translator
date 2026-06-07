@@ -105,8 +105,15 @@ The defaults track the best current real-time models:
 
 - **Speech-to-text — ElevenLabs Scribe v2** (`transcription.provider: elevenlabs`). Best-in-class
   Ukrainian accuracy (≤5% WER), which is the strongest fix for Ukrainian being mis-heard as
-  Polish/Russian. OpenAI `gpt-4o-transcribe` is available as a provider and is the automatic
-  fallback if Scribe fails. The **Speech-to-Text Provider** dropdown switches this live.
+  Polish/Russian. **Deepgram Nova-3** (`provider: deepgram`, set `DEEPGRAM_API_KEY`) and OpenAI
+  `gpt-4o-transcribe` are also selectable; OpenAI is the automatic fallback if the chosen provider
+  fails. The **Speech-to-Text Provider** dropdown switches this live.
+- **True streaming (Deepgram)** — with Deepgram selected and **⚡ True streaming** enabled
+  (`transcription.streaming: true`), the pipeline holds a persistent WebSocket open and streams audio
+  continuously instead of waiting for VAD chunk boundaries. Deepgram does the endpointing; **interim
+  words appear live** on the dashboard and each finished utterance is translated and spoken as it
+  completes. The other providers (Scribe v2, OpenAI) keep the chunked path, so you can trade
+  streaming latency for top accuracy per service.
 - **Text-to-speech — ElevenLabs Flash v2.5** (~75 ms latency, recommended for all real-time use).
   `eleven_v3` (most expressive, not real-time), Multilingual v2, and Turbo v2.5 are also selectable.
 - **TTS speed** is adjustable live under Advanced tuning (try ~1.1–1.15 so the translation keeps

@@ -22,10 +22,14 @@ class AudioConfig:
 
 @dataclass
 class TranscriptionConfig:
-    provider: str = "elevenlabs"      # "elevenlabs" (Scribe v2 — best for Ukrainian)
-                                       #   or "openai" (gpt-4o-transcribe)
+    provider: str = "elevenlabs"      # "elevenlabs" (Scribe v2 — best for Ukrainian),
+                                       #   "deepgram" (Nova-3, streaming-grade), or
+                                       #   "openai" (gpt-4o-transcribe)
     model: str = "gpt-4o-transcribe"  # OpenAI STT model
     elevenlabs_model: str = "scribe_v2"  # ElevenLabs STT model id
+    deepgram_model: str = "nova-3"    # Deepgram STT model
+    streaming: bool = True            # Use the true-streaming WebSocket path when
+                                       #   the provider supports it (Deepgram).
     language: str = "uk"
     temperature: float = 0.0          # 0 = deterministic, least hallucination
     gate_silence: bool = True         # Skip near-silent chunks before STT
@@ -122,6 +126,7 @@ class Config:
 
     openai_api_key: str = ""
     elevenlabs_api_key: str = ""
+    deepgram_api_key: str = ""
 
 
 def load_config(config_path: str = "config.yaml") -> Config:
@@ -175,5 +180,6 @@ def load_config(config_path: str = "config.yaml") -> Config:
 
     cfg.openai_api_key = os.getenv("OPENAI_API_KEY", "")
     cfg.elevenlabs_api_key = os.getenv("ELEVENLABS_API_KEY", "")
+    cfg.deepgram_api_key = os.getenv("DEEPGRAM_API_KEY", "")
 
     return cfg
