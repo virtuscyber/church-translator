@@ -796,7 +796,7 @@ async def api_save_config(request):
     """Save device/language config."""
     data = await request.json()
     # Only allow safe keys
-    allowed = {"input_device", "output_device", "source_language", "target_language", "custom_vocabulary", "elevenlabs_voice_id", "stt_model", "stt_provider", "stt_streaming", "translation_model", "tts_model", "preferred_input_fingerprint", "preferred_output_fingerprint"} | _TUNING_KEYS | _AES67_KEYS
+    allowed = {"input_device", "output_device", "source_language", "target_language", "custom_vocabulary", "elevenlabs_voice_id", "stt_model", "stt_provider", "stt_streaming", "deepgram_model", "elevenlabs_model", "translation_model", "tts_model", "preferred_input_fingerprint", "preferred_output_fingerprint"} | _TUNING_KEYS | _AES67_KEYS
     filtered = {k: v for k, v in _coerce_tuning(data).items() if k in allowed}
     save_config(filtered)
     return web.json_response({"ok": True})
@@ -812,7 +812,7 @@ async def api_languages(request):
 _HOT_APPLY_KEYS = {
     "source_language", "target_language", "custom_vocabulary",
     "elevenlabs_voice_id", "stt_model", "translation_model", "tts_model",
-    "stt_provider",
+    "stt_provider", "deepgram_model", "elevenlabs_model",
 }
 _DEVICE_KEYS = {"input_device", "output_device"}
 
@@ -884,6 +884,8 @@ def _effective_tuning() -> dict:
         "tts_speed": cfg.synthesis.speed,
         "stt_provider": cfg.transcription.provider,
         "stt_streaming": cfg.transcription.streaming,
+        "deepgram_model": cfg.transcription.deepgram_model,
+        "elevenlabs_model": cfg.transcription.elevenlabs_model,
         "api_timeout": 30.0,
         "max_retries": 2,
         "mic_watchdog_sec": 6.0,
@@ -898,7 +900,9 @@ def _effective_tuning() -> dict:
         "aes67_ttl": cfg.output.ttl,
     }
     saved = load_saved_config()
-    for key in _TUNING_KEYS | _AES67_KEYS | {"stt_provider", "stt_streaming"}:
+    for key in _TUNING_KEYS | _AES67_KEYS | {
+        "stt_provider", "stt_streaming", "deepgram_model", "elevenlabs_model",
+    }:
         if key in saved and saved[key] is not None:
             defaults[key] = saved[key]
     return defaults
@@ -915,6 +919,12 @@ def _apply_to_live_components(data: dict) -> list[str]:
     if "stt_model" in data and transcriber is not None:
         transcriber.model = data["stt_model"]
         applied.append("STT model")
+    if "deepgram_model" in data and transcriber is not None:
+        transcriber.deepgram_model = data["deepgram_model"]
+        applied.append("Deepgram model")
+    if "elevenlabs_model" in data and transcriber is not None:
+        transcriber.elevenlabs_model = data["elevenlabs_model"]
+        applied.append("ElevenLabs STT model")
     if "stt_provider" in data and transcriber is not None:
         transcriber.provider = data["stt_provider"]
         applied.append("STT provider")
@@ -1187,12 +1197,15 @@ async def api_setup_status(request):
     load_dotenv(PROJECT_ROOT / ".env", override=True)
     openai_key = os.getenv("OPENAI_API_KEY", "")
     elevenlabs_key = os.getenv("ELEVENLABS_API_KEY", "")
+    deepgram_key = os.getenv("DEEPGRAM_API_KEY", "")
     has_openai = bool(openai_key and not openai_key.startswith("sk-your"))
     has_elevenlabs = bool(elevenlabs_key and elevenlabs_key != "your-elevenlabs-key-here")
+    has_deepgram = bool(deepgram_key and deepgram_key != "your-deepgram-key-here")
     return web.json_response({
         "configured": has_openai,
         "has_openai": has_openai,
         "has_elevenlabs": has_elevenlabs,
+        "has_deepgram": has_deepgram,
     })
 
 
@@ -1263,11 +1276,18 @@ async def api_setup_save(request):
                 key = line.split("=", 1)[0]
                 existing_env[key] = line
 
-    # Update keys
-    if data.get("openai_api_key"):
-        existing_env["OPENAI_API_KEY"] = f"OPENAI_API_KEY={data['openai_api_key']}"
-    if data.get("elevenlabs_api_key"):
-        existing_env["ELEVENLABS_API_KEY"] = f"ELEVENLABS_API_KEY={data['elevenlabs_api_key']}"
+    # Update keys (and reflect into the live process env so they take effect
+    # without a restart).
+    key_map = {
+        "openai_api_key": "OPENAI_API_KEY",
+        "elevenlabs_api_key": "ELEVENLABS_API_KEY",
+        "deepgram_api_key": "DEEPGRAM_API_KEY",
+    }
+    for field, env_name in key_map.items():
+        val = (data.get(field) or "").strip()
+        if val:
+            existing_env[env_name] = f"{env_name}={val}"
+            os.environ[env_name] = val
 
     env_path.write_text("\n".join(existing_env.values()) + "\n", encoding="utf-8")
 
@@ -1567,6 +1587,10 @@ async def _run_live_pipeline():
         saved_stt_provider = saved.get("stt_provider")
         if saved_stt_provider:
             config.transcription.provider = saved_stt_provider
+        if saved.get("deepgram_model"):
+            config.transcription.deepgram_model = saved["deepgram_model"]
+        if saved.get("elevenlabs_model"):
+            config.transcription.elevenlabs_model = saved["elevenlabs_model"]
         if "stt_streaming" in saved and saved["stt_streaming"] is not None:
             config.transcription.streaming = bool(saved["stt_streaming"])
 
@@ -1690,6 +1714,8 @@ async def _run_live_pipeline():
             "elevenlabs_voice_id": saved.get("elevenlabs_voice_id"),
             "stt_model": config.transcription.model,
             "stt_provider": config.transcription.provider,
+            "deepgram_model": config.transcription.deepgram_model,
+            "elevenlabs_model": config.transcription.elevenlabs_model,
             "translation_model": config.translation.model,
             "tts_model": config.synthesis.elevenlabs.model,
             # AES67 snapshot — lets api_apply skip a needless sender restart
