@@ -111,3 +111,60 @@ def test_ensure_dependencies_installs_when_import_check_fails(monkeypatch):
         "Installing dependencies (this may take a minute)...",
         "Dependencies installed",
     ]
+
+
+# ── Port resolution (graceful handling of an already-used port) ───────
+
+import socket
+
+
+def _bind_listening():
+    """Bind+listen on a free loopback port; return (socket, port)."""
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    s.bind(("127.0.0.1", 0))
+    s.listen()
+    return s, s.getsockname()[1]
+
+
+def test_resolve_port_free(monkeypatch):
+    s, port = _bind_listening()
+    s.close()  # now free
+    monkeypatch.setattr(run, "PORT", port)
+    monkeypatch.setattr(run, "PROBE_HOST", "127.0.0.1")
+    assert run.resolve_port() == (port, "free")
+
+
+def test_resolve_port_picks_alternate_when_busy(monkeypatch):
+    s, port = _bind_listening()
+    try:
+        monkeypatch.setattr(run, "PORT", port)
+        monkeypatch.setattr(run, "PORT_FORCED", False)
+        monkeypatch.setattr(run, "PROBE_HOST", "127.0.0.1")
+        monkeypatch.setattr(run, "is_our_dashboard", lambda p: False)
+        chosen, status = run.resolve_port()
+        assert status == "alt" and chosen != port and not run.port_in_use(chosen)
+    finally:
+        s.close()
+
+
+def test_resolve_port_detects_existing_dashboard(monkeypatch):
+    s, port = _bind_listening()
+    try:
+        monkeypatch.setattr(run, "PORT", port)
+        monkeypatch.setattr(run, "PROBE_HOST", "127.0.0.1")
+        monkeypatch.setattr(run, "is_our_dashboard", lambda p: True)
+        assert run.resolve_port() == (port, "ours")
+    finally:
+        s.close()
+
+
+def test_resolve_port_blocked_when_forced(monkeypatch):
+    s, port = _bind_listening()
+    try:
+        monkeypatch.setattr(run, "PORT", port)
+        monkeypatch.setattr(run, "PORT_FORCED", True)
+        monkeypatch.setattr(run, "PROBE_HOST", "127.0.0.1")
+        monkeypatch.setattr(run, "is_our_dashboard", lambda p: False)
+        assert run.resolve_port() == (port, "blocked")
+    finally:
+        s.close()

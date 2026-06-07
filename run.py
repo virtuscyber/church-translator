@@ -8,6 +8,7 @@ Handles venv creation, dependency installation, and browser launch automatically
 import os
 import platform
 import shutil
+import socket
 import subprocess
 import sys
 import time
@@ -18,6 +19,10 @@ PROJECT_ROOT = Path(__file__).parent.resolve()
 VENV_DIR = PROJECT_ROOT / "venv"
 REQUIREMENTS = PROJECT_ROOT / "requirements.txt"
 PORT = int(os.environ.get("DASHBOARD_PORT", "8085"))
+PORT_FORCED = "DASHBOARD_PORT" in os.environ  # user pinned a specific port
+HOST = os.environ.get("DASHBOARD_HOST", "127.0.0.1")
+# Probe loopback even if bound to 0.0.0.0 — that's where a local instance lives.
+PROBE_HOST = "127.0.0.1" if HOST in ("0.0.0.0", "::", "") else HOST
 
 # ── Pretty output ──────────────────────────────────────────────
 
@@ -131,31 +136,73 @@ def ensure_dependencies():
             f"  {pip} install -r requirements.txt"
         )
 
+# ── Port handling ──────────────────────────────────────────────
+
+def port_in_use(port):
+    """True if something is already listening on PROBE_HOST:port."""
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.settimeout(0.5)
+        return s.connect_ex((PROBE_HOST, port)) == 0
+
+def is_our_dashboard(port):
+    """True if the thing on this port answers like our dashboard's health API."""
+    import json
+    import urllib.request
+    try:
+        with urllib.request.urlopen(f"http://{PROBE_HOST}:{port}/api/health", timeout=1.5) as r:
+            return "healthy" in json.loads(r.read().decode("utf-8", "replace"))
+    except Exception:
+        return False
+
+def resolve_port():
+    """Pick the port to run on, working around an already-occupied one.
+
+    Returns (port, status) where status is one of:
+      "free"    — preferred port is available
+      "ours"    — our dashboard is already running there (just open it)
+      "alt"     — preferred port busy; found a free one nearby
+      "blocked" — busy and we shouldn't/can't move (forced port, or none free)
+    """
+    if not port_in_use(PORT):
+        return PORT, "free"
+    if is_our_dashboard(PORT):
+        return PORT, "ours"
+    if PORT_FORCED:
+        return PORT, "blocked"
+    for candidate in range(PORT + 1, PORT + 21):
+        if not port_in_use(candidate):
+            return candidate, "alt"
+    return PORT, "blocked"
+
 # ── Launch ─────────────────────────────────────────────────────
 
-def open_browser():
+def open_browser(port):
     """Open browser after a short delay to let server start."""
     time.sleep(1.5)
-    url = f"http://localhost:{PORT}"
+    url = f"http://localhost:{port}"
     info(f"Opening browser: {url}")
     webbrowser.open(url)
 
-def start_server():
-    """Start the dashboard server using the venv Python."""
+def start_server(port):
+    """Start the dashboard server using the venv Python on the given port."""
     python = get_python_in_venv()
     server_script = str(PROJECT_ROOT / "dashboard" / "server.py")
 
-    info(f"Starting dashboard on http://localhost:{PORT}")
+    info(f"Starting dashboard on http://localhost:{port}")
     info("Press Ctrl+C to stop\n")
+
+    # Pass the resolved port to the server so both agree on it.
+    env = {**os.environ, "DASHBOARD_PORT": str(port)}
 
     # Open browser in a background thread
     import threading
-    threading.Thread(target=open_browser, daemon=True).start()
+    threading.Thread(target=open_browser, args=(port,), daemon=True).start()
 
     try:
-        proc = subprocess.run(
+        subprocess.run(
             [python, server_script],
             cwd=str(PROJECT_ROOT),
+            env=env,
         )
     except KeyboardInterrupt:
         print("\n")
@@ -174,7 +221,31 @@ def main():
     ensure_venv()
     ensure_dependencies()
     print()
-    start_server()
+
+    port, status = resolve_port()
+    if status == "ours":
+        # A dashboard is already running here — just open it, don't start a 2nd.
+        info(f"Dashboard is already running on http://localhost:{PORT} — opening it.")
+        info("(To run a fresh copy, close the other one first, or set DASHBOARD_PORT.)")
+        open_browser(PORT)
+        return
+    if status == "blocked":
+        why = (
+            f"you set DASHBOARD_PORT={PORT}, but it's already taken"
+            if PORT_FORCED else
+            f"port {PORT} and the next 20 ports are all in use"
+        )
+        fail(
+            f"Can't start the dashboard — {why}.\n"
+            "  Another program (or a leftover copy of this app) is using the port.\n"
+            "  Close it and try again, or pick a free port:\n"
+            "      Windows:  set DASHBOARD_PORT=8090 && python run.py\n"
+            "      macOS/Linux:  DASHBOARD_PORT=8090 python run.py"
+        )
+    if status == "alt":
+        warn(f"Port {PORT} is already in use — starting on {port} instead.")
+
+    start_server(port)
 
 if __name__ == "__main__":
     main()
