@@ -477,3 +477,213 @@ async def test_export_transcript_txt_and_srt():
     assert srt.status == 200
     assert "-->" in srt.text and "World" in srt.text
     assert "00:00:00,000 --> 00:00:03,000" in srt.text
+
+
+# ── Live tuning ───────────────────────────────────────────────────────
+
+class _FakeOpenAIClient:
+    def __init__(self):
+        self.opts = None
+
+    def with_options(self, **kw):
+        new = _FakeOpenAIClient()
+        new.opts = kw
+        return new
+
+
+class _FakeComponent:
+    """Stands in for Transcriber/Translator with the attrs tuning touches."""
+    def __init__(self):
+        self.client = _FakeOpenAIClient()
+        self.gate_silence = True
+        self.silence_peak = 0.008
+        self.min_duration_sec = 0.4
+        self.filter_hallucinations = True
+        self.temperature = 0.0
+
+
+class _FakeSynth:
+    def __init__(self):
+        self.timeout = 30.0
+        self.max_retries = 2
+
+
+class _FakeCapture:
+    def __init__(self):
+        self.chunking_calls = []
+
+    def update_chunking(self, **kw):
+        self.chunking_calls.append(kw)
+
+
+@pytest.mark.asyncio
+async def test_tuning_endpoint_returns_effective_values():
+    from dashboard import server
+
+    resp = await server.api_tuning(DummyRequest("/api/tuning"))
+    assert resp.status == 200
+    payload = decode_json_response(resp)
+    # A representative key from each group is present.
+    for key in ("silence_peak", "vad_aggressiveness", "api_timeout",
+                "mic_watchdog_sec", "output_mode", "aes67_port"):
+        assert key in payload
+
+
+def test_coerce_tuning_clamps_and_types():
+    from dashboard import server
+
+    out = server._coerce_tuning({
+        "silence_peak": "0.99",          # clamped to 0.2
+        "max_retries": "10",             # clamped to 6, int
+        "vad_aggressiveness": 5,         # clamped to 3
+        "gate_silence": 0,               # -> bool False
+        "mic_watchdog_sec": 1.0,         # clamped up to 2.0
+    })
+    assert out["silence_peak"] == 0.2
+    assert out["max_retries"] == 6 and isinstance(out["max_retries"], int)
+    assert out["vad_aggressiveness"] == 3
+    assert out["gate_silence"] is False
+    assert out["mic_watchdog_sec"] == 2.0
+
+
+def test_apply_tuning_hot_swaps_into_live_components():
+    from dashboard import server
+
+    transcriber = _FakeComponent()
+    translator = _FakeComponent()
+    synth = _FakeSynth()
+    capture = _FakeCapture()
+    server.state.live_transcriber = transcriber
+    server.state.live_translator = translator
+    server.state.live_synthesizer = synth
+    server.state.live_capture = capture
+    server.state.live_tuning = {}
+    try:
+        data = server._coerce_tuning({
+            "gate_silence": False,
+            "silence_peak": 0.02,
+            "stt_temperature": 0.3,
+            "translation_temperature": 0.5,
+            "filter_hallucinations": False,
+            "api_timeout": 12.0,
+            "max_retries": 4,
+            "mic_watchdog_sec": 9.0,
+            "vad_aggressiveness": 3,
+            "min_chunk_sec": 2.5,
+        })
+        applied = server._apply_tuning_to_live(data)
+
+        assert transcriber.gate_silence is False
+        assert transcriber.silence_peak == 0.02
+        assert transcriber.temperature == 0.3
+        assert translator.temperature == 0.5
+        assert transcriber.filter_hallucinations is False
+        assert translator.filter_hallucinations is False
+        # API options pushed through with_options / synth attrs
+        assert transcriber.client.opts == {"timeout": 12.0, "max_retries": 4}
+        assert synth.timeout == 12.0 and synth.max_retries == 4
+        # VAD update mapped aggressiveness + passed min_chunk_sec
+        assert capture.chunking_calls == [{"aggressiveness": 3, "min_chunk_sec": 2.5}]
+        # Watchdog threshold landed in shared tuning snapshot
+        assert server.state.live_tuning["mic_watchdog_sec"] == 9.0
+        assert "silence gate" in applied and "VAD/chunking" in applied
+    finally:
+        server.state.live_transcriber = None
+        server.state.live_translator = None
+        server.state.live_synthesizer = None
+        server.state.live_capture = None
+        server.state.live_tuning = {}
+
+
+@pytest.mark.asyncio
+async def test_apply_aes67_off_stops_sender():
+    from dashboard import server
+
+    class _FakeSender:
+        def __init__(self):
+            self.stopped = False
+
+        def stop(self):
+            self.stopped = True
+
+    sender = _FakeSender()
+    server.state.live_aes67 = sender
+    try:
+        labels = await server._apply_aes67_to_live({"output_mode": "sounddevice"})
+        assert sender.stopped is True
+        assert server.state.live_aes67 is None
+        assert labels == ["AES67 output (off)"]
+    finally:
+        server.state.live_aes67 = None
+
+
+@pytest.mark.asyncio
+async def test_apply_aes67_dante_starts_sender(monkeypatch):
+    import src.aes67_output as aes_mod
+    from dashboard import server
+
+    created = {}
+
+    class _FakeSender:
+        def __init__(self, *, stream_name, multicast_addr, port, ttl):
+            created.update(stream_name=stream_name, multicast_addr=multicast_addr, port=port, ttl=ttl)
+            self.started = False
+
+        def start(self):
+            self.started = True
+
+        def stop(self):
+            pass
+
+    monkeypatch.setattr(aes_mod, "AES67Sender", _FakeSender)
+    server.state.live_aes67 = None
+    try:
+        labels = await server._apply_aes67_to_live({
+            "output_mode": "dante",
+            "aes67_stream_name": "Test Stream",
+            "aes67_port": 5006,
+        })
+        assert server.state.live_aes67 is not None
+        assert server.state.live_aes67.started is True
+        assert created["stream_name"] == "Test Stream" and created["port"] == 5006
+        assert labels == ["AES67 output (dante)"]
+    finally:
+        server.state.live_aes67 = None
+
+
+@pytest.mark.asyncio
+async def test_apply_skips_aes67_restart_when_unchanged(monkeypatch):
+    from dashboard import server
+
+    calls = {"n": 0}
+
+    async def fake_apply_aes67(data):
+        calls["n"] += 1
+        return ["AES67 output (dante)"]
+
+    monkeypatch.setattr(server, "_apply_aes67_to_live", fake_apply_aes67)
+
+    server.state.live_running = True
+    server.state.live_settings = {
+        "output_mode": "dante", "aes67_stream_name": "S",
+        "aes67_multicast": "239.69.0.1", "aes67_port": 5004, "aes67_ttl": 32,
+    }
+    server.state.live_tuning = {}
+    try:
+        # Re-send identical AES params -> no restart.
+        await server.api_apply(DummyRequest("/api/apply", data={
+            "output_mode": "dante", "aes67_stream_name": "S",
+            "aes67_multicast": "239.69.0.1", "aes67_port": 5004, "aes67_ttl": 32,
+        }))
+        assert calls["n"] == 0
+
+        # Change the port -> restart fires once.
+        await server.api_apply(DummyRequest("/api/apply", data={
+            "output_mode": "dante", "aes67_stream_name": "S",
+            "aes67_multicast": "239.69.0.1", "aes67_port": 5005, "aes67_ttl": 32,
+        }))
+        assert calls["n"] == 1
+    finally:
+        server.state.live_running = False
+        server.state.live_settings = {}
+        server.state.live_tuning = {}

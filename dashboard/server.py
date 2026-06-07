@@ -174,6 +174,9 @@ class AppState:
         self.live_translator = None
         self.live_synthesizer = None
         self.live_settings: dict = {}
+        # Live-tunable runtime knobs (quality/VAD/reliability). Shared with the
+        # watchdog so threshold changes take effect without a restart.
+        self.live_tuning: dict = {}
         self.audio_monitor_lock = asyncio.Lock()
 
 state = AppState()
@@ -793,8 +796,8 @@ async def api_save_config(request):
     """Save device/language config."""
     data = await request.json()
     # Only allow safe keys
-    allowed = {"input_device", "output_device", "source_language", "target_language", "custom_vocabulary", "elevenlabs_voice_id", "stt_model", "translation_model", "tts_model", "preferred_input_fingerprint", "preferred_output_fingerprint"}
-    filtered = {k: v for k, v in data.items() if k in allowed}
+    allowed = {"input_device", "output_device", "source_language", "target_language", "custom_vocabulary", "elevenlabs_voice_id", "stt_model", "translation_model", "tts_model", "preferred_input_fingerprint", "preferred_output_fingerprint"} | _TUNING_KEYS | _AES67_KEYS
+    filtered = {k: v for k, v in _coerce_tuning(data).items() if k in allowed}
     save_config(filtered)
     return web.json_response({"ok": True})
 
@@ -811,6 +814,86 @@ _HOT_APPLY_KEYS = {
     "elevenlabs_voice_id", "stt_model", "translation_model", "tts_model",
 }
 _DEVICE_KEYS = {"input_device", "output_device"}
+
+# Live-tunable runtime knobs (transcription quality, VAD/chunking, reliability).
+# These hot-apply into the running components without a restart.
+_TUNING_KEYS = {
+    # transcription quality
+    "gate_silence", "silence_peak", "min_duration_sec", "filter_hallucinations",
+    "stt_temperature", "translation_temperature",
+    # reliability
+    "api_timeout", "max_retries", "mic_watchdog_sec",
+    # VAD / chunking
+    "vad_aggressiveness", "min_chunk_sec", "max_chunk_sec", "silence_threshold_sec",
+}
+# AES67/Dante output. Changing these can't happen in place — the RTP sender is
+# stopped and recreated, re-announcing the stream over SAP.
+_AES67_KEYS = {
+    "output_mode", "aes67_stream_name", "aes67_multicast", "aes67_port", "aes67_ttl",
+}
+
+# Type coercion + sane bounds for tuning values coming from the UI/JSON.
+_TUNING_COERCE = {
+    "gate_silence": lambda v: bool(v),
+    "filter_hallucinations": lambda v: bool(v),
+    "silence_peak": lambda v: max(0.0, min(0.2, float(v))),
+    "min_duration_sec": lambda v: max(0.0, min(5.0, float(v))),
+    "stt_temperature": lambda v: max(0.0, min(1.0, float(v))),
+    "translation_temperature": lambda v: max(0.0, min(1.0, float(v))),
+    "api_timeout": lambda v: max(5.0, min(120.0, float(v))),
+    "max_retries": lambda v: max(0, min(6, int(v))),
+    "mic_watchdog_sec": lambda v: max(2.0, min(60.0, float(v))),
+    "vad_aggressiveness": lambda v: max(0, min(3, int(v))),
+    "min_chunk_sec": lambda v: max(0.5, min(15.0, float(v))),
+    "max_chunk_sec": lambda v: max(1.0, min(30.0, float(v))),
+    "silence_threshold_sec": lambda v: max(0.1, min(3.0, float(v))),
+}
+
+
+def _coerce_tuning(data: dict) -> dict:
+    """Coerce + clamp incoming tuning values; drop anything unparseable."""
+    out: dict = {}
+    for key, raw in data.items():
+        if key not in _TUNING_COERCE:
+            out[key] = raw
+            continue
+        try:
+            out[key] = _TUNING_COERCE[key](raw)
+        except (TypeError, ValueError):
+            logger.warning("Ignoring invalid tuning value %s=%r", key, raw)
+    return out
+
+
+def _effective_tuning() -> dict:
+    """Current effective tuning values: config.yaml defaults overlaid with any
+    saved overrides. Used to populate the UI so sliders show real state."""
+    from src.config import load_config
+    cfg = load_config()
+    defaults = {
+        "gate_silence": cfg.transcription.gate_silence,
+        "silence_peak": cfg.transcription.silence_peak,
+        "min_duration_sec": cfg.transcription.min_duration_sec,
+        "filter_hallucinations": cfg.transcription.filter_hallucinations,
+        "stt_temperature": cfg.transcription.temperature,
+        "translation_temperature": cfg.translation.temperature,
+        "api_timeout": 30.0,
+        "max_retries": 2,
+        "mic_watchdog_sec": 6.0,
+        "vad_aggressiveness": cfg.pipeline.vad_aggressiveness,
+        "min_chunk_sec": cfg.pipeline.min_chunk_sec,
+        "max_chunk_sec": cfg.pipeline.max_chunk_sec,
+        "silence_threshold_sec": cfg.pipeline.silence_threshold_sec,
+        "output_mode": cfg.output.mode,
+        "aes67_stream_name": cfg.output.stream_name,
+        "aes67_multicast": cfg.output.multicast_address,
+        "aes67_port": cfg.output.port,
+        "aes67_ttl": cfg.output.ttl,
+    }
+    saved = load_saved_config()
+    for key in _TUNING_KEYS | _AES67_KEYS:
+        if key in saved and saved[key] is not None:
+            defaults[key] = saved[key]
+    return defaults
 
 
 def _apply_to_live_components(data: dict) -> list[str]:
@@ -854,6 +937,124 @@ def _apply_to_live_components(data: dict) -> list[str]:
     return applied
 
 
+def _apply_tuning_to_live(data: dict) -> list[str]:
+    """Hot-swap transcription-quality / VAD / reliability knobs into the
+    running components. ``data`` must already be coerced. Returns labels."""
+    applied: list[str] = []
+    transcriber = state.live_transcriber
+    translator = state.live_translator
+    synthesizer = state.live_synthesizer
+    capture = state.live_capture
+
+    # ── Transcription quality ──
+    if transcriber is not None:
+        if "gate_silence" in data:
+            transcriber.gate_silence = data["gate_silence"]
+            applied.append("silence gate")
+        if "silence_peak" in data:
+            transcriber.silence_peak = data["silence_peak"]
+            applied.append("silence threshold")
+        if "min_duration_sec" in data:
+            transcriber.min_duration_sec = data["min_duration_sec"]
+            applied.append("min chunk duration")
+        if "stt_temperature" in data:
+            transcriber.temperature = data["stt_temperature"]
+            applied.append("STT temperature")
+    if "translation_temperature" in data and translator is not None:
+        translator.temperature = data["translation_temperature"]
+        applied.append("translation temperature")
+    if "filter_hallucinations" in data:
+        if transcriber is not None:
+            transcriber.filter_hallucinations = data["filter_hallucinations"]
+        if translator is not None:
+            translator.filter_hallucinations = data["filter_hallucinations"]
+        applied.append("hallucination filter")
+
+    # ── Reliability: API timeout / retries ──
+    if "api_timeout" in data or "max_retries" in data:
+        opts = {}
+        if "api_timeout" in data:
+            opts["timeout"] = data["api_timeout"]
+        if "max_retries" in data:
+            opts["max_retries"] = data["max_retries"]
+        for comp in (transcriber, translator):
+            if comp is None:
+                continue
+            try:
+                comp.client = comp.client.with_options(**opts)
+            except Exception as e:  # pragma: no cover - SDK shape guard
+                logger.warning("Could not update OpenAI client options: %s", e)
+        if synthesizer is not None:
+            if "api_timeout" in data:
+                synthesizer.timeout = data["api_timeout"]
+            if "max_retries" in data:
+                synthesizer.max_retries = data["max_retries"]
+        applied.append("API timeout/retries")
+
+    if "mic_watchdog_sec" in data:
+        applied.append("mic watchdog")
+
+    # ── VAD / chunking ──
+    if capture is not None:
+        mapped = {}
+        if "vad_aggressiveness" in data:
+            mapped["aggressiveness"] = data["vad_aggressiveness"]
+        for k in ("min_chunk_sec", "max_chunk_sec", "silence_threshold_sec"):
+            if k in data:
+                mapped[k] = data[k]
+        if mapped:
+            try:
+                capture.update_chunking(**mapped)
+                applied.append("VAD/chunking")
+            except Exception as e:  # pragma: no cover
+                logger.warning("Could not update chunking: %s", e)
+
+    # Keep the shared snapshot current (watchdog threshold + UI reads).
+    state.live_tuning.update({k: v for k, v in data.items() if k in _TUNING_KEYS})
+    return applied
+
+
+async def _apply_aes67_to_live(data: dict) -> list[str]:
+    """Restart the AES67/Dante RTP sender with new params (it can't change in
+    place). Stops any existing sender and, if Dante output is wanted, starts a
+    fresh one — re-announcing the stream over SAP."""
+    eff = _effective_tuning()
+    eff.update({k: v for k, v in data.items() if k in _AES67_KEYS})
+    mode = str(eff.get("output_mode") or "sounddevice")
+    want_dante = mode in ("dante", "both")
+
+    if state.live_aes67 is not None:
+        try:
+            state.live_aes67.stop()
+        except Exception as e:
+            logger.debug("Error stopping AES67 sender: %s", e)
+        state.live_aes67 = None
+
+    if not want_dante:
+        return ["AES67 output (off)"]
+
+    from src.aes67_output import AES67Sender
+    try:
+        sender = AES67Sender(
+            stream_name=str(eff.get("aes67_stream_name") or "Church Translation EN"),
+            multicast_addr=str(eff.get("aes67_multicast") or "239.69.0.1"),
+            port=int(eff.get("aes67_port") or 5004),
+            ttl=int(eff.get("aes67_ttl") or 32),
+        )
+        sender.start()
+        state.live_aes67 = sender
+        return [f"AES67 output ({mode})"]
+    except Exception as e:
+        logger.error("Failed to (re)start AES67 sender: %s", e)
+        await broadcast({"type": "error", "message": f"AES67 output failed to start: {e}"})
+        return []
+
+
+async def api_tuning(request):
+    """Return current effective tuning + AES67 values for the UI."""
+    return web.json_response(_effective_tuning())
+
+
 async def api_apply(request):
     """Persist settings and hot-apply them to a running live pipeline.
 
@@ -867,9 +1068,11 @@ async def api_apply(request):
     except json.JSONDecodeError:
         return web.json_response({"ok": False, "error": "Invalid JSON body"}, status=400)
 
-    allowed = _HOT_APPLY_KEYS | _DEVICE_KEYS | {
+    allowed = _HOT_APPLY_KEYS | _DEVICE_KEYS | _TUNING_KEYS | _AES67_KEYS | {
         "preferred_input_fingerprint", "preferred_output_fingerprint",
     }
+    # Coerce/clamp numeric tuning values before persisting or applying.
+    data = _coerce_tuning(data)
     filtered = {k: v for k, v in data.items() if k in allowed}
     save_config(filtered)
 
@@ -890,6 +1093,19 @@ async def api_apply(request):
             applied = _apply_to_live_components(hot)
             # Keep the snapshot current so the next diff is accurate.
             state.live_settings.update(filtered)
+
+        tuning = {k: v for k, v in filtered.items() if k in _TUNING_KEYS}
+        if tuning:
+            applied += _apply_tuning_to_live(tuning)
+
+        aes = {k: v for k, v in filtered.items() if k in _AES67_KEYS}
+        if aes:
+            # Only restart the RTP sender if AES67 params actually changed —
+            # restarting re-announces the stream and briefly interrupts it.
+            prev = state.live_settings or {}
+            if any(str(aes[k]) != str(prev.get(k, "")) for k in aes):
+                applied += await _apply_aes67_to_live(aes)
+                state.live_settings.update(aes)
 
         if applied:
             await broadcast({
@@ -1238,6 +1454,7 @@ async def _stop_live_pipeline(*, notify_clients: bool) -> None:
     state.live_translator = None
     state.live_synthesizer = None
     state.live_settings = {}
+    state.live_tuning = {}
     state.stats["status"] = "stopped"
     state.stats["total_runtime"] = time.time() - state.start_time if state.start_time else 0.0
 
@@ -1330,6 +1547,29 @@ async def _run_live_pipeline():
         if saved_tts_model:
             config.synthesis.elevenlabs.model = saved_tts_model
 
+        # Apply saved live-tuning overrides (quality / VAD / reliability / AES67)
+        # onto the config so the components below pick them up at construction.
+        tune = _effective_tuning()
+        config.transcription.gate_silence = bool(tune["gate_silence"])
+        config.transcription.silence_peak = float(tune["silence_peak"])
+        config.transcription.min_duration_sec = float(tune["min_duration_sec"])
+        config.transcription.filter_hallucinations = bool(tune["filter_hallucinations"])
+        config.transcription.temperature = float(tune["stt_temperature"])
+        config.translation.temperature = float(tune["translation_temperature"])
+        config.translation.filter_hallucinations = bool(tune["filter_hallucinations"])
+        config.pipeline.vad_aggressiveness = int(tune["vad_aggressiveness"])
+        config.pipeline.min_chunk_sec = float(tune["min_chunk_sec"])
+        config.pipeline.max_chunk_sec = float(tune["max_chunk_sec"])
+        config.pipeline.silence_threshold_sec = float(tune["silence_threshold_sec"])
+        config.output.mode = str(tune["output_mode"])
+        config.output.stream_name = str(tune["aes67_stream_name"])
+        config.output.multicast_address = str(tune["aes67_multicast"])
+        config.output.port = int(tune["aes67_port"])
+        config.output.ttl = int(tune["aes67_ttl"])
+        api_timeout = float(tune["api_timeout"])
+        max_retries = int(tune["max_retries"])
+        state.live_tuning = {k: tune[k] for k in _TUNING_KEYS}
+
         # Initialize components
         capture = VADAudioCapture(
             device=config.audio.input_device,
@@ -1352,6 +1592,8 @@ async def _run_live_pipeline():
             silence_peak=config.transcription.silence_peak,
             min_duration_sec=config.transcription.min_duration_sec,
             filter_hallucinations=config.transcription.filter_hallucinations,
+            timeout=api_timeout,
+            max_retries=max_retries,
         )
 
         system_prompt = _build_translation_prompt(config.translation.system_prompt, custom_vocab)
@@ -1365,6 +1607,8 @@ async def _run_live_pipeline():
             filter_hallucinations=config.translation.filter_hallucinations,
             source_language=_language_name(src_lang),
             target_language=_language_name(tgt_lang),
+            timeout=api_timeout,
+            max_retries=max_retries,
         )
 
         synthesizer = Synthesizer(
@@ -1377,6 +1621,8 @@ async def _run_live_pipeline():
             elevenlabs_similarity=config.synthesis.elevenlabs.similarity_boost,
             openai_model=config.synthesis.openai.model,
             openai_voice=config.synthesis.openai.voice,
+            timeout=api_timeout,
+            max_retries=max_retries,
         )
 
         playback = AudioPlayback(
@@ -1415,6 +1661,13 @@ async def _run_live_pipeline():
             "stt_model": config.transcription.model,
             "translation_model": config.translation.model,
             "tts_model": config.synthesis.elevenlabs.model,
+            # AES67 snapshot — lets api_apply skip a needless sender restart
+            # when these are re-sent unchanged.
+            "output_mode": config.output.mode,
+            "aes67_stream_name": config.output.stream_name,
+            "aes67_multicast": config.output.multicast_address,
+            "aes67_port": config.output.port,
+            "aes67_ttl": config.output.ttl,
         }
 
         await capture.start()
@@ -1476,8 +1729,11 @@ async def _run_live_pipeline():
                     if audio_bytes is None:  # End-of-slot marker
                         break
                     play_tasks = [playback.play(audio_bytes)]
-                    if aes67:
-                        play_tasks.append(aes67.play(audio_bytes))
+                    # Read from state so a live AES67 enable/disable/restart
+                    # (via the tuning UI) takes effect mid-stream.
+                    sender = state.live_aes67
+                    if sender:
+                        play_tasks.append(sender.play(audio_bytes))
                     try:
                         await asyncio.gather(*play_tasks)
                     except Exception as e:
@@ -1512,12 +1768,16 @@ async def _run_live_pipeline():
 
             A healthy input stream fires its callback continuously, so a long
             gap means the device stalled or was unplugged. We alert the
-            operator and keep trying to re-open it until audio resumes.
+            operator and keep trying to re-open it until audio resumes. The
+            stall threshold is read live from tuning so the UI can adjust it.
             """
-            STALL_SEC = 6.0
+            def stall_sec() -> float:
+                return float(state.live_tuning.get("mic_watchdog_sec", 6.0))
+
             announced_down = False
-            await asyncio.sleep(STALL_SEC)  # warm-up grace period
+            await asyncio.sleep(stall_sec())  # warm-up grace period
             while state.live_running:
+                STALL_SEC = stall_sec()
                 try:
                     if capture.seconds_since_audio() > STALL_SEC:
                         if not announced_down:
@@ -1776,6 +2036,7 @@ async def _run_live_pipeline():
         state.live_translator = None
         state.live_synthesizer = None
         state.live_settings = {}
+        state.live_tuning = {}
         state.live_running = False
         state.running = False
         state.stats["status"] = "stopped"
@@ -1924,6 +2185,7 @@ def create_app():
     app.router.add_get("/api/status", api_status)
     app.router.add_get("/api/transcript", api_transcript)
     app.router.add_get("/api/transcript/export", api_export_transcript)
+    app.router.add_get("/api/tuning", api_tuning)
     app.router.add_post("/api/start", api_start)
     app.router.add_post("/api/stop", api_stop)
     app.router.add_post("/api/test-file", api_test_file)

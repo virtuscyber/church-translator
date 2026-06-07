@@ -882,6 +882,98 @@
             <textarea id="customVocab" placeholder="e.g., Bethel, Jehovah Jireh, Pastor Petro Ivanov..."></textarea>
         </div>
 
+        <!-- Advanced live-tuning -->
+        <details id="advancedTuning" style="border:1px solid var(--border);border-radius:8px;padding:8px 12px;margin-top:8px;">
+            <summary style="cursor:pointer;font-weight:600;color:var(--accent);">🔧 Advanced tuning (applies live)</summary>
+            <div style="font-size:0.82em;color:var(--text-dim);margin:8px 0;">
+                These take effect immediately while running. Defaults suit most rooms — tweak only if you hear phantom text, dropped quiet speech, or choppy segmentation.
+            </div>
+
+            <h4 style="margin:10px 0 6px;color:var(--text);">🎯 Transcription quality</h4>
+            <div class="form-row">
+                <div class="form-group">
+                    <label><input type="checkbox" id="tuneGateSilence"> Gate near-silent chunks (anti-hallucination)</label>
+                    <label style="margin-top:6px;"><input type="checkbox" id="tuneFilterHalluc"> Filter known hallucination phrases</label>
+                </div>
+                <div class="form-group">
+                    <label>Silence threshold (peak 0–0.2) <span class="hint" id="tuneSilencePeakVal"></span></label>
+                    <input type="range" id="tuneSilencePeak" min="0" max="0.05" step="0.001" oninput="document.getElementById('tuneSilencePeakVal').textContent=this.value">
+                    <label style="margin-top:6px;">Min chunk duration (s)</label>
+                    <input type="number" id="tuneMinDuration" min="0" max="5" step="0.1">
+                </div>
+            </div>
+            <div class="form-row">
+                <div class="form-group">
+                    <label>STT temperature (0 = deterministic)</label>
+                    <input type="number" id="tuneSttTemp" min="0" max="1" step="0.05">
+                </div>
+                <div class="form-group">
+                    <label>Translation temperature</label>
+                    <input type="number" id="tuneTransTemp" min="0" max="1" step="0.05">
+                </div>
+            </div>
+
+            <h4 style="margin:12px 0 6px;color:var(--text);">🗣️ Voice activity / chunking</h4>
+            <div class="form-row">
+                <div class="form-group">
+                    <label>VAD aggressiveness</label>
+                    <select id="tuneVadAggr">
+                        <option value="0">0 — least filtering (quiet rooms)</option>
+                        <option value="1">1</option>
+                        <option value="2">2 — default</option>
+                        <option value="3">3 — most filtering (noisy/reverb)</option>
+                    </select>
+                    <label style="margin-top:6px;">Silence split threshold (s)</label>
+                    <input type="number" id="tuneSilenceThresh" min="0.1" max="3" step="0.1">
+                </div>
+                <div class="form-group">
+                    <label>Min chunk (s)</label>
+                    <input type="number" id="tuneMinChunk" min="0.5" max="15" step="0.5">
+                    <label style="margin-top:6px;">Max chunk (s)</label>
+                    <input type="number" id="tuneMaxChunk" min="1" max="30" step="0.5">
+                </div>
+            </div>
+
+            <h4 style="margin:12px 0 6px;color:var(--text);">🛡️ Reliability</h4>
+            <div class="form-row">
+                <div class="form-group">
+                    <label>API timeout (s)</label>
+                    <input type="number" id="tuneApiTimeout" min="5" max="120" step="1">
+                    <label style="margin-top:6px;">Max retries</label>
+                    <input type="number" id="tuneMaxRetries" min="0" max="6" step="1">
+                </div>
+                <div class="form-group">
+                    <label>Mic-stall watchdog (s)</label>
+                    <input type="number" id="tuneWatchdog" min="2" max="60" step="1">
+                </div>
+            </div>
+
+            <h4 style="margin:12px 0 6px;color:var(--text);">📡 AES67 / Dante output</h4>
+            <div class="form-group" style="font-size:0.8em;color:var(--text-dim);">
+                Changing these restarts the RTP sender and re-announces the stream. Use ≥5 ms receiver latency for a software source.
+            </div>
+            <div class="form-row">
+                <div class="form-group">
+                    <label>Output mode</label>
+                    <select id="tuneOutputMode">
+                        <option value="sounddevice">Speaker only (no AES67)</option>
+                        <option value="dante">AES67/Dante only</option>
+                        <option value="both">Speaker + AES67/Dante</option>
+                    </select>
+                    <label style="margin-top:6px;">Stream name</label>
+                    <input type="text" id="tuneStreamName" placeholder="Church Translation EN">
+                </div>
+                <div class="form-group">
+                    <label>Multicast address</label>
+                    <input type="text" id="tuneMulticast" placeholder="239.69.0.1">
+                    <div class="form-row" style="margin-top:6px;">
+                        <div class="form-group"><label>Port</label><input type="number" id="tunePort" min="1024" max="65535" step="1"></div>
+                        <div class="form-group"><label>TTL</label><input type="number" id="tuneTtl" min="1" max="255" step="1"></div>
+                    </div>
+                </div>
+            </div>
+        </details>
+
         <!-- Apply / Save bar -->
         <div class="apply-bar">
             <div style="display:flex;align-items:center;gap:14px;">
@@ -1083,6 +1175,11 @@
     const SETTINGS_FIELD_IDS = [
         'inputDevice', 'outputDevice', 'sourceLang', 'targetLang',
         'sttModel', 'translationModel', 'ttsModel', 'voiceSelect', 'customVocab',
+        // Advanced live-tuning fields
+        'tuneGateSilence', 'tuneSilencePeak', 'tuneMinDuration', 'tuneFilterHalluc',
+        'tuneSttTemp', 'tuneTransTemp', 'tuneVadAggr', 'tuneMinChunk', 'tuneMaxChunk',
+        'tuneSilenceThresh', 'tuneApiTimeout', 'tuneMaxRetries', 'tuneWatchdog',
+        'tuneOutputMode', 'tuneStreamName', 'tuneMulticast', 'tunePort', 'tuneTtl',
     ];
 
     function markDirty() {
@@ -1132,6 +1229,7 @@
     populateLanguageDropdowns();
     checkSetupStatus();
     loadHealthChecks();
+    loadTuning();
     wireDirtyTracking();
 
     function populateLanguageDropdowns() {
@@ -1594,6 +1692,34 @@
     document.getElementById('sourceLang').addEventListener('change', updateLangPairLabel);
     document.getElementById('targetLang').addEventListener('change', updateLangPairLabel);
 
+    // Read advanced tuning fields. Returns {} if the panel hasn't loaded yet
+    // (e.g. /api/tuning failed) so we never send empty/NaN values.
+    function collectTuning() {
+        const g = id => document.getElementById(id);
+        if (!g('tuneSilencePeak') || g('tuneSilencePeak').value === '') return {};
+        const num = id => parseFloat(g(id).value);
+        return {
+            gate_silence: g('tuneGateSilence').checked,
+            filter_hallucinations: g('tuneFilterHalluc').checked,
+            silence_peak: num('tuneSilencePeak'),
+            min_duration_sec: num('tuneMinDuration'),
+            stt_temperature: num('tuneSttTemp'),
+            translation_temperature: num('tuneTransTemp'),
+            vad_aggressiveness: parseInt(g('tuneVadAggr').value),
+            min_chunk_sec: num('tuneMinChunk'),
+            max_chunk_sec: num('tuneMaxChunk'),
+            silence_threshold_sec: num('tuneSilenceThresh'),
+            api_timeout: num('tuneApiTimeout'),
+            max_retries: parseInt(g('tuneMaxRetries').value),
+            mic_watchdog_sec: num('tuneWatchdog'),
+            output_mode: g('tuneOutputMode').value,
+            aes67_stream_name: g('tuneStreamName').value,
+            aes67_multicast: g('tuneMulticast').value,
+            aes67_port: parseInt(g('tunePort').value),
+            aes67_ttl: parseInt(g('tuneTtl').value),
+        };
+    }
+
     function collectSettings() {
         const inputVal = document.getElementById('inputDevice').value || null;
         const outputVal = document.getElementById('outputDevice').value || null;
@@ -1609,8 +1735,39 @@
                 stt_model: document.getElementById('sttModel').value,
                 translation_model: document.getElementById('translationModel').value,
                 tts_model: document.getElementById('ttsModel').value,
+                ...collectTuning(),
             },
         };
+    }
+
+    // Populate the advanced tuning fields from the server's effective values.
+    async function loadTuning() {
+        try {
+            const res = await apiFetch('/api/tuning');
+            if (!res.ok) return;
+            const t = await res.json();
+            const g = id => document.getElementById(id);
+            const setNum = (id, v) => { if (g(id) && v !== undefined && v !== null) g(id).value = v; };
+            if (g('tuneGateSilence')) g('tuneGateSilence').checked = !!t.gate_silence;
+            if (g('tuneFilterHalluc')) g('tuneFilterHalluc').checked = !!t.filter_hallucinations;
+            setNum('tuneSilencePeak', t.silence_peak);
+            const sp = g('tuneSilencePeakVal'); if (sp) sp.textContent = t.silence_peak;
+            setNum('tuneMinDuration', t.min_duration_sec);
+            setNum('tuneSttTemp', t.stt_temperature);
+            setNum('tuneTransTemp', t.translation_temperature);
+            if (g('tuneVadAggr')) g('tuneVadAggr').value = String(t.vad_aggressiveness);
+            setNum('tuneMinChunk', t.min_chunk_sec);
+            setNum('tuneMaxChunk', t.max_chunk_sec);
+            setNum('tuneSilenceThresh', t.silence_threshold_sec);
+            setNum('tuneApiTimeout', t.api_timeout);
+            setNum('tuneMaxRetries', t.max_retries);
+            setNum('tuneWatchdog', t.mic_watchdog_sec);
+            if (g('tuneOutputMode')) g('tuneOutputMode').value = t.output_mode || 'sounddevice';
+            if (g('tuneStreamName')) g('tuneStreamName').value = t.aes67_stream_name || '';
+            if (g('tuneMulticast')) g('tuneMulticast').value = t.aes67_multicast || '';
+            setNum('tunePort', t.aes67_port);
+            setNum('tuneTtl', t.aes67_ttl);
+        } catch (e) { /* non-fatal — keep placeholder values */ }
     }
 
     function rememberDeviceFingerprints(inputVal, outputVal) {

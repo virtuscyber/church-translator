@@ -99,6 +99,22 @@ running translation instantly with no audio gap:
 
 When nothing is running, **Apply** simply saves your settings for the next session.
 
+### Advanced live tuning
+
+Under **Settings → 🔧 Advanced tuning** you can adjust the quality, segmentation,
+reliability, and AES67 knobs while a service is running — changes take effect
+immediately (no restart):
+
+- **Transcription quality** — silence gate, silence threshold, min chunk duration,
+  hallucination filter, STT/translation temperature. Reach for these if you hear
+  phantom text on dead air or quiet speech getting dropped.
+- **Voice activity / chunking** — VAD aggressiveness and min/max/silence-split chunk
+  timing (bump aggressiveness in noisy or reverberant rooms).
+- **Reliability** — API timeout, retry count, and the mic-stall watchdog threshold.
+- **AES67/Dante output** — output mode, stream name, multicast address, port, TTL.
+  Saving these restarts and re-announces the RTP sender (only when they actually
+  change).
+
 ### Reliability during a service
 
 - **API hiccups** (rate limits, brief network drops) are retried automatically with

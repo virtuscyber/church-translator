@@ -111,6 +111,13 @@ class VADAudioCapture:
 
         self._open_stream()
 
+    def update_chunking(self, **kwargs) -> None:
+        """Live-update VAD/chunking parameters (aggressiveness, min/max chunk
+        seconds, silence threshold). Held under the chunker lock so it can't
+        race the audio thread mid-``feed()``."""
+        with self._chunker_lock:
+            self._chunker.update_settings(**kwargs)
+
     def seconds_since_audio(self) -> float:
         """Seconds since the last audio callback (0 if not started yet)."""
         if not self._running or self._last_frame_monotonic == 0.0:
