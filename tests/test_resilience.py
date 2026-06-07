@@ -186,3 +186,114 @@ async def test_transcribe_passes_language_and_prompt_to_api():
     assert out == "Слава Богу"
     assert captured["language"] == "uk"
     assert "українською" in captured["prompt"]  # Ukrainian anchor reached the API
+
+
+# ── ElevenLabs Scribe v2 STT provider + fallback ──────────────────────
+
+@pytest.mark.asyncio
+async def test_transcriber_uses_elevenlabs_when_provider_set():
+    from src.transcriber import Transcriber
+
+    t = Transcriber(api_key="x", provider="elevenlabs", elevenlabs_api_key="k", gate_silence=False)
+
+    async def fake_el(_wav):
+        return "Слава Богу"
+
+    t._transcribe_elevenlabs = fake_el
+    t._transcribe_openai = AsyncMock(side_effect=AssertionError("OpenAI should not be called"))
+
+    out = await t.transcribe(b"wav")
+    assert out == "Слава Богу"
+    assert t.last_error is None
+
+
+@pytest.mark.asyncio
+async def test_transcriber_falls_back_to_openai_when_elevenlabs_fails():
+    from src.transcriber import Transcriber
+
+    t = Transcriber(api_key="x", provider="elevenlabs", elevenlabs_api_key="k", gate_silence=False)
+
+    async def boom(_wav):
+        raise RuntimeError("scribe 500")
+
+    async def ok(_wav):
+        return "fallback text"
+
+    t._transcribe_elevenlabs = boom
+    t._transcribe_openai = ok
+
+    out = await t.transcribe(b"wav")
+    assert out == "fallback text"
+    assert t.last_error is None  # recovered via fallback
+
+
+@pytest.mark.asyncio
+async def test_transcriber_reports_error_when_all_providers_fail():
+    from src.transcriber import Transcriber
+
+    t = Transcriber(api_key="x", provider="elevenlabs", elevenlabs_api_key="k", gate_silence=False)
+
+    async def boom(_wav):
+        raise RuntimeError("down")
+
+    t._transcribe_elevenlabs = boom
+    t._transcribe_openai = boom
+
+    out = await t.transcribe(b"wav")
+    assert out is None
+    assert t.last_error and "down" in t.last_error
+
+
+# ── Synthesizer speed ─────────────────────────────────────────────────
+
+def test_synthesizer_defaults_to_flash_and_accepts_speed():
+    from src.synthesizer import Synthesizer
+
+    s = Synthesizer(provider="elevenlabs", speed=1.15)
+    assert s.el_model == "eleven_flash_v2_5"
+    assert s.speed == 1.15
+
+
+@pytest.mark.asyncio
+async def test_transcribe_elevenlabs_builds_correct_request(monkeypatch):
+    import aiohttp
+    from src.transcriber import Transcriber
+
+    captured = {}
+
+    class FakeResp:
+        status = 200
+        async def text(self):
+            return ""
+        async def json(self):
+            return {"text": "Слава Богу"}
+        async def __aenter__(self):
+            return self
+        async def __aexit__(self, *a):
+            return False
+
+    class FakeSession:
+        def __init__(self, *a, **k):
+            pass
+        async def __aenter__(self):
+            return self
+        async def __aexit__(self, *a):
+            return False
+        def post(self, url, data=None, headers=None):
+            captured["url"] = url
+            captured["headers"] = headers
+            captured["data"] = data
+            return FakeResp()
+
+    monkeypatch.setattr(aiohttp, "ClientSession", FakeSession)
+
+    t = Transcriber(api_key="x", provider="elevenlabs", elevenlabs_api_key="EL_KEY",
+                    elevenlabs_model="scribe_v2", language="uk", gate_silence=False)
+    out = await t.transcribe(b"wav-bytes")
+
+    assert out == "Слава Богу"
+    assert captured["url"] == "https://api.elevenlabs.io/v1/speech-to-text"
+    assert captured["headers"]["xi-api-key"] == "EL_KEY"
+    # model_id + language_code were added to the multipart form
+    field_names = {f[0].get("name") for f in captured["data"]._fields}
+    assert "model_id" in field_names and "language_code" in field_names and "file" in field_names

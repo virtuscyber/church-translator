@@ -56,6 +56,9 @@ class TranslationPipeline:
             silence_peak=config.transcription.silence_peak,
             min_duration_sec=config.transcription.min_duration_sec,
             filter_hallucinations=config.transcription.filter_hallucinations,
+            provider=config.transcription.provider,
+            elevenlabs_api_key=config.elevenlabs_api_key,
+            elevenlabs_model=config.transcription.elevenlabs_model,
         )
 
         self.translator = Translator(
@@ -77,6 +80,7 @@ class TranslationPipeline:
             elevenlabs_similarity=config.synthesis.elevenlabs.similarity_boost,
             openai_model=config.synthesis.openai.model,
             openai_voice=config.synthesis.openai.voice,
+            speed=config.synthesis.speed,
         )
 
         # Output at 24kHz for ElevenLabs PCM, 24kHz for OpenAI PCM

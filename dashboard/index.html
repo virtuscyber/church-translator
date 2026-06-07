@@ -835,7 +835,15 @@
         <!-- Model Selection -->
         <div class="form-row">
             <div class="form-group">
-                <label>🧠 Speech-to-Text Model</label>
+                <label>🎧 Speech-to-Text Provider</label>
+                <select id="sttProvider">
+                    <option value="elevenlabs">ElevenLabs Scribe v2 (best for Ukrainian)</option>
+                    <option value="openai">OpenAI (gpt-4o-transcribe / Whisper)</option>
+                </select>
+                <div class="model-note" style="font-size:0.75em;color:var(--text-dim);margin-top:2px;">Scribe v2 has the lowest Ukrainian error rate. The OpenAI model below is used when provider = OpenAI (and as automatic fallback).</div>
+            </div>
+            <div class="form-group">
+                <label>🧠 OpenAI STT Model</label>
                 <select id="sttModel">
                     <option value="gpt-4o-transcribe">gpt-4o-transcribe (Best accuracy, slower)</option>
                     <option value="gpt-4o-mini-transcribe">gpt-4o-mini-transcribe (Fast, good accuracy)</option>
@@ -859,10 +867,10 @@
             <div class="form-group">
                 <label>🔊 TTS Model (ElevenLabs)</label>
                 <select id="ttsModel">
-                    <option value="eleven_turbo_v2_5">Turbo v2.5 (Fastest, low latency)</option>
-                    <option value="eleven_multilingual_v2">Multilingual v2 (Best quality, slower)</option>
-                    <option value="eleven_monolingual_v1">Monolingual v1 (English only, fast)</option>
-                    <option value="eleven_flash_v2_5">Flash v2.5 (Ultra-fast, good quality)</option>
+                    <option value="eleven_flash_v2_5">Flash v2.5 (~75ms, best for live) ⭐</option>
+                    <option value="eleven_turbo_v2_5">Turbo v2.5 (fast, legacy)</option>
+                    <option value="eleven_multilingual_v2">Multilingual v2 (high quality, slower)</option>
+                    <option value="eleven_v3">Eleven v3 (most expressive — not real-time)</option>
                 </select>
                 <div class="model-note" id="ttsNote" style="font-size:0.75em;color:var(--text-dim);margin-top:2px;"></div>
             </div>
@@ -911,6 +919,16 @@
                     <label>Translation temperature</label>
                     <input type="number" id="tuneTransTemp" min="0" max="1" step="0.05">
                 </div>
+            </div>
+
+            <h4 style="margin:12px 0 6px;color:var(--text);">🔊 Voice playback</h4>
+            <div class="form-row">
+                <div class="form-group">
+                    <label>TTS speed <span class="hint" id="tuneTtsSpeedVal"></span></label>
+                    <input type="range" id="tuneTtsSpeed" min="0.7" max="1.2" step="0.05" oninput="document.getElementById('tuneTtsSpeedVal').textContent=this.value">
+                    <div style="font-size:0.78em;color:var(--text-dim);">1.0 = natural. ~1.1–1.15 keeps translated speech from lagging the speaker.</div>
+                </div>
+                <div class="form-group"></div>
             </div>
 
             <h4 style="margin:12px 0 6px;color:var(--text);">🗣️ Voice activity / chunking</h4>
@@ -1174,10 +1192,10 @@
 
     const SETTINGS_FIELD_IDS = [
         'inputDevice', 'outputDevice', 'sourceLang', 'targetLang',
-        'sttModel', 'translationModel', 'ttsModel', 'voiceSelect', 'customVocab',
+        'sttProvider', 'sttModel', 'translationModel', 'ttsModel', 'voiceSelect', 'customVocab',
         // Advanced live-tuning fields
         'tuneGateSilence', 'tuneSilencePeak', 'tuneMinDuration', 'tuneFilterHalluc',
-        'tuneSttTemp', 'tuneTransTemp', 'tuneVadAggr', 'tuneMinChunk', 'tuneMaxChunk',
+        'tuneSttTemp', 'tuneTransTemp', 'tuneTtsSpeed', 'tuneVadAggr', 'tuneMinChunk', 'tuneMaxChunk',
         'tuneSilenceThresh', 'tuneApiTimeout', 'tuneMaxRetries', 'tuneWatchdog',
         'tuneOutputMode', 'tuneStreamName', 'tuneMulticast', 'tunePort', 'tuneTtl',
     ];
@@ -1663,6 +1681,9 @@
                 document.getElementById('voiceSelect').value = cfg.elevenlabs_voice_id;
                 updateVoiceInfo();
             }
+            if (cfg.stt_provider) {
+                document.getElementById('sttProvider').value = cfg.stt_provider;
+            }
             if (cfg.stt_model) {
                 document.getElementById('sttModel').value = cfg.stt_model;
                 updateModelNote('sttModel', 'sttNote', 'stt');
@@ -1705,6 +1726,7 @@
             min_duration_sec: num('tuneMinDuration'),
             stt_temperature: num('tuneSttTemp'),
             translation_temperature: num('tuneTransTemp'),
+            tts_speed: num('tuneTtsSpeed'),
             vad_aggressiveness: parseInt(g('tuneVadAggr').value),
             min_chunk_sec: num('tuneMinChunk'),
             max_chunk_sec: num('tuneMaxChunk'),
@@ -1732,6 +1754,7 @@
                 target_language: document.getElementById('targetLang').value,
                 custom_vocabulary: document.getElementById('customVocab').value,
                 elevenlabs_voice_id: document.getElementById('voiceSelect').value || null,
+                stt_provider: document.getElementById('sttProvider').value,
                 stt_model: document.getElementById('sttModel').value,
                 translation_model: document.getElementById('translationModel').value,
                 tts_model: document.getElementById('ttsModel').value,
@@ -1755,6 +1778,8 @@
             setNum('tuneMinDuration', t.min_duration_sec);
             setNum('tuneSttTemp', t.stt_temperature);
             setNum('tuneTransTemp', t.translation_temperature);
+            setNum('tuneTtsSpeed', t.tts_speed);
+            const tsv = g('tuneTtsSpeedVal'); if (tsv) tsv.textContent = t.tts_speed;
             if (g('tuneVadAggr')) g('tuneVadAggr').value = String(t.vad_aggressiveness);
             setNum('tuneMinChunk', t.min_chunk_sec);
             setNum('tuneMaxChunk', t.max_chunk_sec);
@@ -1762,6 +1787,7 @@
             setNum('tuneApiTimeout', t.api_timeout);
             setNum('tuneMaxRetries', t.max_retries);
             setNum('tuneWatchdog', t.mic_watchdog_sec);
+            if (g('sttProvider') && t.stt_provider) g('sttProvider').value = t.stt_provider;
             if (g('tuneOutputMode')) g('tuneOutputMode').value = t.output_mode || 'sounddevice';
             if (g('tuneStreamName')) g('tuneStreamName').value = t.aes67_stream_name || '';
             if (g('tuneMulticast')) g('tuneMulticast').value = t.aes67_multicast || '';

@@ -100,6 +100,9 @@ class StreamingPipeline:
             silence_peak=config.transcription.silence_peak,
             min_duration_sec=config.transcription.min_duration_sec,
             filter_hallucinations=config.transcription.filter_hallucinations,
+            provider=config.transcription.provider,
+            elevenlabs_api_key=config.elevenlabs_api_key,
+            elevenlabs_model=config.transcription.elevenlabs_model,
         )
         self.translator = Translator(
             api_key=config.openai_api_key,
@@ -119,6 +122,7 @@ class StreamingPipeline:
             elevenlabs_similarity=config.synthesis.elevenlabs.similarity_boost,
             openai_model=config.synthesis.openai.model,
             openai_voice=config.synthesis.openai.voice,
+            speed=config.synthesis.speed,
         )
         self._output_mode = config.output.mode
         self.playback = None
@@ -423,6 +427,9 @@ class StreamingFileTest:
             silence_peak=config.transcription.silence_peak,
             min_duration_sec=config.transcription.min_duration_sec,
             filter_hallucinations=config.transcription.filter_hallucinations,
+            provider=config.transcription.provider,
+            elevenlabs_api_key=config.elevenlabs_api_key,
+            elevenlabs_model=config.transcription.elevenlabs_model,
         )
         self.translator = Translator(
             api_key=config.openai_api_key,
@@ -442,6 +449,7 @@ class StreamingFileTest:
             elevenlabs_similarity=config.synthesis.elevenlabs.similarity_boost,
             openai_model=config.synthesis.openai.model,
             openai_voice=config.synthesis.openai.voice,
+            speed=config.synthesis.speed,
         )
 
     async def process_chunks(self, wav_chunks: list[bytes]) -> list[ChunkState]:

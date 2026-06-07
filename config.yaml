@@ -6,7 +6,11 @@ audio:
   chunk_duration_sec: 4       # Seconds of audio per STT chunk
 
 transcription:
-  model: "gpt-4o-transcribe"
+  provider: "elevenlabs"      # "elevenlabs" = Scribe v2 (best Ukrainian WER);
+                              #   "openai" = gpt-4o-transcribe. OpenAI is the
+                              #   automatic fallback if the primary fails.
+  elevenlabs_model: "scribe_v2"
+  model: "gpt-4o-transcribe"  # used when provider = openai (and as fallback)
   language: "uk"              # Ukrainian (ISO 639-1)
   temperature: 0.0            # 0 = deterministic; reduces STT hallucination
   gate_silence: true          # Skip near-silent chunks before STT (kills the
@@ -25,8 +29,11 @@ translation:
 
 synthesis:
   provider: "elevenlabs"      # "elevenlabs" or "openai"
+  speed: 1.0                  # Playback speed. ElevenLabs ~0.7-1.2; try 1.1-1.15
+                              #   so the translation keeps pace with the speaker.
   elevenlabs:
-    model: "eleven_turbo_v2_5"
+    model: "eleven_flash_v2_5"  # ~75ms latency, best for live. eleven_v3 is
+                                #   higher quality but too slow for real time.
     voice_id: "pNInz6obpgDQGcFmaJgB"   # Adam
     stability: 0.7
     similarity_boost: 0.8

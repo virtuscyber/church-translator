@@ -27,17 +27,20 @@ class Synthesizer:
         openai_api_key: str = "",
         elevenlabs_api_key: str = "",
         elevenlabs_voice_id: str = "pNInz6obpgDQGcFmaJgB",
-        elevenlabs_model: str = "eleven_turbo_v2_5",
+        elevenlabs_model: str = "eleven_flash_v2_5",
         elevenlabs_stability: float = 0.7,
         elevenlabs_similarity: float = 0.8,
         openai_model: str = "gpt-4o-mini-tts",
         openai_voice: str = "onyx",
         timeout: float = 30.0,
         max_retries: int = 2,
+        speed: float = 1.0,
     ):
         self.provider = provider
         self.openai_api_key = openai_api_key
         self.elevenlabs_api_key = elevenlabs_api_key
+        # Playback speed (ElevenLabs ~0.7-1.2, OpenAI 0.25-4.0).
+        self.speed = speed
         # ElevenLabs settings
         self.el_voice_id = elevenlabs_voice_id
         self.el_model = elevenlabs_model
@@ -146,6 +149,7 @@ class Synthesizer:
             voice_settings={
                 "stability": self.el_stability,
                 "similarity_boost": self.el_similarity,
+                "speed": self.speed,
             },
             output_format="pcm_24000",
         )
@@ -211,7 +215,7 @@ class Synthesizer:
             voice=self.oai_voice,
             input=text,
             response_format="pcm",
-            speed=1.0,
+            speed=self.speed,
         )
 
         # OpenAI returns the full response — check if we can stream it
@@ -260,6 +264,7 @@ class Synthesizer:
             voice_settings={
                 "stability": self.el_stability,
                 "similarity_boost": self.el_similarity,
+                "speed": self.speed,
             },
             output_format="pcm_24000",
         )
@@ -295,7 +300,7 @@ class Synthesizer:
             voice=self.oai_voice,
             input=text,
             response_format="pcm",
-            speed=1.0,
+            speed=self.speed,
         )
 
         return response.content

@@ -687,3 +687,55 @@ async def test_apply_skips_aes67_restart_when_unchanged(monkeypatch):
         server.state.live_running = False
         server.state.live_settings = {}
         server.state.live_tuning = {}
+
+
+# ── TTS speed + STT provider live settings ────────────────────────────
+
+@pytest.mark.asyncio
+async def test_tuning_includes_tts_speed():
+    from dashboard import server
+    resp = await server.api_tuning(DummyRequest("/api/tuning"))
+    payload = decode_json_response(resp)
+    assert "tts_speed" in payload
+
+
+def test_coerce_clamps_tts_speed():
+    from dashboard import server
+    assert server._coerce_tuning({"tts_speed": 5.0})["tts_speed"] == 1.2
+    assert server._coerce_tuning({"tts_speed": 0.1})["tts_speed"] == 0.7
+
+
+def test_apply_tuning_sets_synth_speed():
+    from dashboard import server
+
+    class _Synth:
+        def __init__(self):
+            self.speed = 1.0
+
+    synth = _Synth()
+    server.state.live_synthesizer = synth
+    server.state.live_tuning = {}
+    try:
+        applied = server._apply_tuning_to_live(server._coerce_tuning({"tts_speed": 1.15}))
+        assert synth.speed == 1.15
+        assert "TTS speed" in applied
+    finally:
+        server.state.live_synthesizer = None
+        server.state.live_tuning = {}
+
+
+def test_apply_stt_provider_hot_swap():
+    from dashboard import server
+
+    class _T:
+        def __init__(self):
+            self.provider = "openai"
+
+    t = _T()
+    server.state.live_transcriber = t
+    try:
+        applied = server._apply_to_live_components({"stt_provider": "elevenlabs"})
+        assert t.provider == "elevenlabs"
+        assert "STT provider" in applied
+    finally:
+        server.state.live_transcriber = None

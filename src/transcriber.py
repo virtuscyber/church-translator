@@ -52,9 +52,14 @@ class Transcriber:
         timeout: float = 30.0,
         max_retries: int = 2,
         prompt: Optional[str] = None,
+        provider: str = "openai",
+        elevenlabs_api_key: str = "",
+        elevenlabs_model: str = "scribe_v2",
     ):
         # Client-level timeout + retries give automatic exponential backoff on
         # transient failures (429/5xx/network) so a blip doesn't drop a chunk.
+        # The OpenAI client is always created so it can serve as a fallback even
+        # when ElevenLabs is the primary provider.
         self.client = AsyncOpenAI(api_key=api_key, timeout=timeout, max_retries=max_retries)
         self.model = model
         self.language = (language or "uk").strip().lower()
@@ -66,19 +71,24 @@ class Transcriber:
         self.silence_peak = silence_peak
         self.min_duration_sec = min_duration_sec
         self.filter_hallucinations = filter_hallucinations
+        self.timeout = timeout
+        # STT provider: "openai" or "elevenlabs" (Scribe v2 — best Ukrainian WER).
+        self.provider = provider
+        self.elevenlabs_api_key = elevenlabs_api_key
+        self.elevenlabs_model = elevenlabs_model
         # Set to the error string when a transcription raises, else None. Lets
         # callers tell "API failed" apart from "no speech" (both return None).
         self.last_error: Optional[str] = None
 
     async def transcribe(self, wav_bytes: bytes) -> Optional[str]:
-        """Transcribe WAV audio bytes to Ukrainian text.
+        """Transcribe WAV audio bytes to source-language text.
 
         Args:
             wav_bytes: WAV-formatted audio bytes.
 
         Returns:
-            Transcribed Ukrainian text, or None if the chunk is non-speech,
-            empty, or a detected hallucination.
+            Transcribed text, or None if the chunk is non-speech, empty, or a
+            detected hallucination.
         """
         # Gate near-silent / too-short chunks BEFORE hitting the API. This is
         # the single biggest lever against STT hallucination: models invent
@@ -92,37 +102,81 @@ class Transcriber:
             return None
 
         self.last_error = None
-        try:
-            audio_file = io.BytesIO(wav_bytes)
-            audio_file.name = "chunk.wav"
+        text = await self._run_stt(wav_bytes)
+        if not text:
+            return None
 
-            # The source-language prompt strongly anchors the detected language;
-            # only send it when we have one so other languages are unaffected.
-            extra = {"prompt": self.prompt} if self.prompt else {}
-            response = await self.client.audio.transcriptions.create(
-                model=self.model,
-                file=audio_file,
-                language=self.language,
-                response_format="text",
-                temperature=self.temperature,
-                **extra,
-            )
-
-            text = response.strip() if isinstance(response, str) else response.text.strip()
-
+        if self.filter_hallucinations:
+            text = sanitize_transcript(text, source="STT")
             if not text:
-                logger.debug("Empty transcription result.")
                 return None
 
-            if self.filter_hallucinations:
-                text = sanitize_transcript(text, source="STT")
-                if not text:
-                    return None
+        logger.info("Transcribed: %s", text[:80] + ("..." if len(text) > 80 else ""))
+        return text
 
-            logger.info("Transcribed: %s", text[:80] + ("..." if len(text) > 80 else ""))
-            return text
+    async def _run_stt(self, wav_bytes: bytes) -> Optional[str]:
+        """Run STT through the configured provider, falling back to OpenAI.
 
-        except Exception as e:
-            self.last_error = str(e)
-            logger.error("Transcription failed: %s", e)
-            return None
+        Returns the raw transcript text (may be empty), or None on hard failure
+        (in which case ``last_error`` is set).
+        """
+        providers = ["elevenlabs", "openai"] if self.provider == "elevenlabs" else ["openai"]
+        last_exc: Optional[Exception] = None
+        for i, prov in enumerate(providers):
+            try:
+                if prov == "elevenlabs":
+                    return await self._transcribe_elevenlabs(wav_bytes)
+                return await self._transcribe_openai(wav_bytes)
+            except Exception as e:
+                last_exc = e
+                logger.warning("%s STT failed: %s", prov, e)
+                if i + 1 < len(providers):
+                    logger.info("Falling back to OpenAI STT...")
+        self.last_error = str(last_exc) if last_exc else "transcription failed"
+        return None
+
+    async def _transcribe_openai(self, wav_bytes: bytes) -> str:
+        """Transcribe one chunk via OpenAI. Raises on API error."""
+        audio_file = io.BytesIO(wav_bytes)
+        audio_file.name = "chunk.wav"
+
+        # The source-language prompt strongly anchors the detected language;
+        # only send it when we have one so other languages are unaffected.
+        extra = {"prompt": self.prompt} if self.prompt else {}
+        response = await self.client.audio.transcriptions.create(
+            model=self.model,
+            file=audio_file,
+            language=self.language,
+            response_format="text",
+            temperature=self.temperature,
+            **extra,
+        )
+        return response.strip() if isinstance(response, str) else response.text.strip()
+
+    async def _transcribe_elevenlabs(self, wav_bytes: bytes) -> str:
+        """Transcribe one chunk via ElevenLabs Scribe v2 (REST). Raises on error.
+
+        Scribe v2 has the best Ukrainian word-error-rate of the available
+        models; ``language_code`` enforces the source language so it isn't
+        mis-detected as Polish/Russian.
+        """
+        import aiohttp
+
+        url = "https://api.elevenlabs.io/v1/speech-to-text"
+        form = aiohttp.FormData()
+        form.add_field("model_id", self.elevenlabs_model)
+        if self.language:
+            form.add_field("language_code", self.language)
+        form.add_field("file", wav_bytes, filename="chunk.wav", content_type="audio/wav")
+
+        timeout = aiohttp.ClientTimeout(total=self.timeout)
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.post(
+                url, data=form, headers={"xi-api-key": self.elevenlabs_api_key}
+            ) as resp:
+                if resp.status != 200:
+                    body = await resp.text()
+                    raise RuntimeError(f"ElevenLabs STT HTTP {resp.status}: {body[:200]}")
+                data = await resp.json()
+        return (data.get("text") or "").strip()
+
