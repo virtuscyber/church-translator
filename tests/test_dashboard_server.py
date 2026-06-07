@@ -813,3 +813,56 @@ async def test_setup_save_clickthrough_preserves_existing_keys(monkeypatch, tmp_
         assert "DEEPGRAM_API_KEY" not in os.environ
     finally:
         os.environ.pop("DEEPGRAM_API_KEY", None)
+
+
+# ── Endpoint smoke test (no GET endpoint should 5xx) ──────────────────
+
+@pytest.mark.asyncio
+async def test_get_endpoints_do_not_5xx(monkeypatch, tmp_path):
+    from aiohttp.test_utils import TestClient, TestServer
+    from dashboard import server
+
+    # Isolate persistence + avoid external calls.
+    monkeypatch.setattr(server, "CONFIG_PATH", tmp_path / "config.json")
+    monkeypatch.setattr(server, "PROJECT_ROOT", tmp_path)
+    monkeypatch.setitem(sys.modules, "sounddevice", fake_sounddevice_for_smoke())
+
+    client = TestClient(TestServer(server.create_app()))
+    await client.start_server()
+    try:
+        paths = [
+            "/",
+            "/api/languages",
+            "/api/tuning",
+            "/api/transcript",
+            "/api/transcript/export?format=txt",
+            "/api/transcript/export?format=srt",
+            "/api/config",
+            "/api/settings",
+            "/api/setup/status",
+            "/api/health",
+            "/api/devices",
+        ]
+        for path in paths:
+            resp = await client.get(path)
+            assert resp.status < 500, f"{path} returned {resp.status}"
+    finally:
+        await client.close()
+
+
+def fake_sounddevice_for_smoke():
+    """Minimal sounddevice stand-in so /api/health and /api/devices don't error."""
+    devices = [
+        {"name": "Mic", "default_samplerate": 48000, "max_input_channels": 1, "max_output_channels": 0},
+        {"name": "Speaker", "default_samplerate": 48000, "max_input_channels": 0, "max_output_channels": 2},
+    ]
+
+    def query_devices(index=None):
+        return devices if index is None else devices[index]
+
+    return SimpleNamespace(
+        query_devices=query_devices,
+        check_input_settings=lambda **k: None,
+        check_output_settings=lambda **k: None,
+        default=SimpleNamespace(device=(0, 1)),
+    )

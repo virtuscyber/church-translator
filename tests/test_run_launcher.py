@@ -20,12 +20,24 @@ def test_check_python_passes_on_python_311_plus(monkeypatch):
 def test_check_ffmpeg_passes_when_installed(monkeypatch):
     messages = []
 
+    # Don't depend on the host having ffmpeg — exercise the logic deterministically.
+    monkeypatch.setattr(run.shutil, "which", lambda name: "/usr/bin/ffmpeg")
     monkeypatch.setattr(run, "info", messages.append)
     monkeypatch.setattr(run, "fail", lambda message: (_ for _ in ()).throw(AssertionError(message)))
 
     run.check_ffmpeg()
 
     assert "ffmpeg — OK" in messages
+
+
+def test_check_ffmpeg_fails_when_missing(monkeypatch):
+    monkeypatch.setattr(run.shutil, "which", lambda name: None)
+    captured = {}
+    monkeypatch.setattr(run, "fail", lambda message: captured.setdefault("msg", message))
+
+    run.check_ffmpeg()
+
+    assert "ffmpeg is not installed" in captured["msg"]
 
 
 def test_ensure_venv_skips_creation_when_python_exists(monkeypatch, tmp_path):
