@@ -1106,15 +1106,20 @@
                 <div class="test-result" id="openaiResult"></div>
             </div>
 
-            <!-- Step 2: ElevenLabs Key -->
+            <!-- Step 2: Optional keys (ElevenLabs + Deepgram) -->
             <div class="wizard-step" id="wizStep2">
-                <div class="step-title">Step 2: ElevenLabs API Key <span class="optional-badge">Optional</span></div>
-                <div class="step-desc">For high-quality voice output. If skipped, OpenAI text-to-speech will be used instead.</div>
+                <div class="step-title">Step 2: Optional API Keys <span class="optional-badge">Optional</span></div>
+                <div class="step-desc">Both are optional — leave them blank to skip. You can always add them later in Settings.</div>
+                <label style="font-size:0.85em;display:block;margin-bottom:4px;">ElevenLabs <span style="color:var(--text-dim);">— high-quality voice + Scribe v2 STT (falls back to OpenAI)</span></label>
                 <div class="key-input-group">
                     <input type="password" id="wizElevenlabsKey" placeholder="Enter ElevenLabs key..." autocomplete="off">
                     <button class="btn btn-secondary btn-sm" onclick="testElevenLabs()">Test</button>
                 </div>
                 <div class="test-result" id="elevenlabsResult"></div>
+                <label style="font-size:0.85em;display:block;margin:12px 0 4px;">Deepgram <span style="color:var(--text-dim);">— fast Nova-3 STT + true streaming</span></label>
+                <div class="key-input-group">
+                    <input type="password" id="wizDeepgramKey" placeholder="Enter Deepgram key..." autocomplete="off">
+                </div>
             </div>
 
             <!-- Step 3: Language Defaults -->
@@ -2064,14 +2069,10 @@
         const data = {
             openai_api_key: document.getElementById('wizOpenaiKey').value.trim(),
             elevenlabs_api_key: document.getElementById('wizElevenlabsKey').value.trim(),
+            deepgram_api_key: document.getElementById('wizDeepgramKey').value.trim(),
             source_language: document.getElementById('wizSourceLang').value,
             target_language: document.getElementById('wizTargetLang').value,
         };
-        if (!data.openai_api_key) {
-            showToast('⚠️ OpenAI API key is required');
-            setWizardStep(1);
-            return;
-        }
         try {
             const res = await apiFetch('/api/setup/save', {
                 method: 'POST',
@@ -2085,7 +2086,14 @@
                 document.getElementById('targetLang').value = data.target_language;
                 updateLangPairLabel();
                 closeWizard();
-                showToast('✅ Setup complete! You\'re ready to translate.');
+                refreshDeepgramKeyStatus?.();
+                // Nothing is required — but nudge if there's no OpenAI key, since
+                // translation needs one (it can be added later in Settings).
+                if (!data.openai_api_key) {
+                    showToast('ℹ️ Saved. Add an OpenAI key in Settings before translating.');
+                } else {
+                    showToast('✅ Setup complete! You\'re ready to translate.');
+                }
             } else {
                 showToast('❌ Failed to save settings');
             }
