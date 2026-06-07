@@ -32,8 +32,12 @@ class Transcriber:
         silence_peak: float = 0.008,
         min_duration_sec: float = 0.4,
         filter_hallucinations: bool = True,
+        timeout: float = 30.0,
+        max_retries: int = 2,
     ):
-        self.client = AsyncOpenAI(api_key=api_key)
+        # Client-level timeout + retries give automatic exponential backoff on
+        # transient failures (429/5xx/network) so a blip doesn't drop a chunk.
+        self.client = AsyncOpenAI(api_key=api_key, timeout=timeout, max_retries=max_retries)
         self.model = model
         self.language = language
         self.temperature = temperature
@@ -41,6 +45,9 @@ class Transcriber:
         self.silence_peak = silence_peak
         self.min_duration_sec = min_duration_sec
         self.filter_hallucinations = filter_hallucinations
+        # Set to the error string when a transcription raises, else None. Lets
+        # callers tell "API failed" apart from "no speech" (both return None).
+        self.last_error: Optional[str] = None
 
     async def transcribe(self, wav_bytes: bytes) -> Optional[str]:
         """Transcribe WAV audio bytes to Ukrainian text.
@@ -63,6 +70,7 @@ class Transcriber:
             logger.debug("Skipping near-silent chunk (no speech detected).")
             return None
 
+        self.last_error = None
         try:
             audio_file = io.BytesIO(wav_bytes)
             audio_file.name = "chunk.wav"
@@ -90,5 +98,6 @@ class Transcriber:
             return text
 
         except Exception as e:
+            self.last_error = str(e)
             logger.error("Transcription failed: %s", e)
             return None

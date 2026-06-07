@@ -26,14 +26,20 @@ class Translator:
         filter_hallucinations: bool = True,
         source_language: str = "Ukrainian",
         target_language: str = "English",
+        timeout: float = 30.0,
+        max_retries: int = 2,
     ):
-        self.client = AsyncOpenAI(api_key=api_key)
+        # Client-level timeout + retries give automatic backoff on transient
+        # failures so a single API blip doesn't silently drop a translation.
+        self.client = AsyncOpenAI(api_key=api_key, timeout=timeout, max_retries=max_retries)
         self.system_prompt = system_prompt
         self.model = model
         self.temperature = temperature
         self.filter_hallucinations = filter_hallucinations
         self.source_language = source_language
         self.target_language = target_language
+        # Error string when a translation raises, else None (see Transcriber).
+        self.last_error: Optional[str] = None
         self._context: deque[str] = deque(maxlen=context_sentences)
 
     async def translate(self, ukrainian_text: str) -> Optional[str]:
@@ -62,6 +68,7 @@ class Translator:
             logger.debug("Translation skipped: empty or non-speech input.")
             return None
 
+        self.last_error = None
         try:
             # Provide previous translations purely as reference for continuity.
             # The system prompt instructs the model never to re-translate or
@@ -110,5 +117,6 @@ class Translator:
             return english_text
 
         except Exception as e:
+            self.last_error = str(e)
             logger.error("Translation failed: %s", e)
             return None

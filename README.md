@@ -99,9 +99,24 @@ running translation instantly with no audio gap:
 
 When nothing is running, **Apply** simply saves your settings for the next session.
 
+### Reliability during a service
+
+- **API hiccups** (rate limits, brief network drops) are retried automatically with
+  backoff and per-request timeouts. A sustained failure (bad key, exhausted quota)
+  is surfaced in the dashboard instead of silently dropping audio.
+- **Microphone drop-outs** are detected within seconds — the dashboard alerts you and
+  automatically re-opens the device when it comes back.
+- **Export the transcript** any time with the **⬇ TXT** / **⬇ SRT** buttons on the
+  transcript panel (handy for service records or captions).
+
 ---
 
 ## Alternative: Docker
+
+> **Note:** Docker is for the dashboard and file-test workflow. Live microphone
+> capture does **not** work in a container without explicit audio-device passthrough
+> (`--device /dev/snd` plus a PulseAudio/ALSA bridge). For live translation, run
+> natively (see Quick Start).
 
 ```bash
 git clone https://github.com/virtuscyber/church-translator.git

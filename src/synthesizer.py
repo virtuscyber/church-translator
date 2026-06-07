@@ -6,6 +6,7 @@ Supports both batch mode (returns all audio at once) and streaming mode
 
 from __future__ import annotations
 
+import asyncio
 import io
 import logging
 from typing import AsyncIterator, Optional
@@ -31,6 +32,8 @@ class Synthesizer:
         elevenlabs_similarity: float = 0.8,
         openai_model: str = "gpt-4o-mini-tts",
         openai_voice: str = "onyx",
+        timeout: float = 30.0,
+        max_retries: int = 2,
     ):
         self.provider = provider
         self.openai_api_key = openai_api_key
@@ -43,6 +46,11 @@ class Synthesizer:
         # OpenAI settings
         self.oai_model = openai_model
         self.oai_voice = openai_voice
+        # Resilience
+        self.timeout = timeout
+        self.max_retries = max_retries
+        # Error string when synthesis ultimately fails, else None.
+        self.last_error: Optional[str] = None
 
     # ── Batch mode (original interface, unchanged) ────────────────────
 
@@ -55,20 +63,36 @@ class Synthesizer:
         Returns:
             Complete audio bytes (PCM), or None on failure.
         """
-        try:
-            if self.provider == "elevenlabs":
-                return await self._synthesize_elevenlabs(text)
-            else:
-                return await self._synthesize_openai(text)
-        except Exception as e:
-            logger.error("Synthesis failed with %s: %s", self.provider, e)
-            if self.provider == "elevenlabs":
-                logger.info("Falling back to OpenAI TTS...")
-                try:
-                    return await self._synthesize_openai(text)
-                except Exception as e2:
-                    logger.error("Fallback also failed: %s", e2)
-            return None
+        self.last_error = None
+        last_exc: Optional[Exception] = None
+
+        # Retry the configured provider with exponential backoff on transient
+        # failures before giving up.
+        for attempt in range(self.max_retries + 1):
+            try:
+                if self.provider == "elevenlabs":
+                    return await asyncio.wait_for(self._synthesize_elevenlabs(text), self.timeout)
+                return await asyncio.wait_for(self._synthesize_openai(text), self.timeout)
+            except Exception as e:
+                last_exc = e
+                logger.warning(
+                    "Synthesis attempt %d/%d failed (%s): %s",
+                    attempt + 1, self.max_retries + 1, self.provider, e,
+                )
+                if attempt < self.max_retries:
+                    await asyncio.sleep(0.5 * (2 ** attempt))
+
+        # All retries exhausted — fall back to OpenAI if we were on ElevenLabs.
+        if self.provider == "elevenlabs":
+            logger.info("Falling back to OpenAI TTS...")
+            try:
+                return await asyncio.wait_for(self._synthesize_openai(text), self.timeout)
+            except Exception as e2:
+                last_exc = e2
+                logger.error("Fallback also failed: %s", e2)
+
+        self.last_error = str(last_exc) if last_exc else "synthesis failed"
+        return None
 
     # ── Streaming mode (new — yields chunks as they arrive) ──────────
 
@@ -85,6 +109,7 @@ class Synthesizer:
         Yields:
             PCM audio byte chunks.
         """
+        self.last_error = None
         try:
             if self.provider == "elevenlabs":
                 async for chunk in self._stream_elevenlabs(text):
@@ -101,14 +126,18 @@ class Synthesizer:
                     audio = await self._synthesize_openai(text)
                     if audio:
                         yield audio
+                        return
                 except Exception as e2:
                     logger.error("Fallback also failed: %s", e2)
+                    self.last_error = str(e2)
+                    return
+            self.last_error = str(e)
 
     async def _stream_elevenlabs(self, text: str) -> AsyncIterator[bytes]:
         """Stream PCM chunks from ElevenLabs API."""
         from elevenlabs import AsyncElevenLabs
 
-        client = AsyncElevenLabs(api_key=self.elevenlabs_api_key)
+        client = AsyncElevenLabs(api_key=self.elevenlabs_api_key, timeout=self.timeout)
 
         audio_iter = client.text_to_speech.convert(
             voice_id=self.el_voice_id,
@@ -174,7 +203,7 @@ class Synthesizer:
         """Stream PCM chunks from OpenAI TTS API."""
         from openai import AsyncOpenAI
 
-        client = AsyncOpenAI(api_key=self.openai_api_key)
+        client = AsyncOpenAI(api_key=self.openai_api_key, timeout=self.timeout, max_retries=self.max_retries)
 
         # Use streaming response
         response = await client.audio.speech.create(
@@ -222,7 +251,7 @@ class Synthesizer:
         """Synthesize using ElevenLabs API (batch — collects all chunks)."""
         from elevenlabs import AsyncElevenLabs
 
-        client = AsyncElevenLabs(api_key=self.elevenlabs_api_key)
+        client = AsyncElevenLabs(api_key=self.elevenlabs_api_key, timeout=self.timeout)
 
         audio_iter = client.text_to_speech.convert(
             voice_id=self.el_voice_id,
@@ -259,7 +288,7 @@ class Synthesizer:
         """Synthesize using OpenAI TTS API (batch)."""
         from openai import AsyncOpenAI
 
-        client = AsyncOpenAI(api_key=self.openai_api_key)
+        client = AsyncOpenAI(api_key=self.openai_api_key, timeout=self.timeout, max_retries=self.max_retries)
 
         response = await client.audio.speech.create(
             model=self.oai_model,

@@ -736,7 +736,11 @@
     <div class="transcript-section">
         <div class="transcript-header">
             <h2>📜 Live Transcript</h2>
-            <span class="transcript-count" id="transcriptCount">0 segments</span>
+            <div style="display:flex;align-items:center;gap:10px;">
+                <span class="transcript-count" id="transcriptCount">0 segments</span>
+                <button class="btn btn-secondary btn-sm" onclick="exportTranscript('txt')" title="Download transcript as text">⬇ TXT</button>
+                <button class="btn btn-secondary btn-sm" onclick="exportTranscript('srt')" title="Download transcript as subtitles">⬇ SRT</button>
+            </div>
         </div>
         <div class="transcript-body" id="transcriptBody">
             <div class="transcript-empty" id="transcriptEmpty">
@@ -2042,6 +2046,28 @@
 
     async function stopTest() {
         try { await apiFetch('/api/stop', {method: 'POST'}); } catch (err) { showToast('❌ Failed to stop: ' + err.message); }
+    }
+
+    // ── Transcript export ─────────────────────────
+    async function exportTranscript(fmt) {
+        const count = document.querySelectorAll('.transcript-entry').length;
+        if (count === 0) { showToast('Nothing to export yet'); return; }
+        try {
+            const res = await apiFetch('/api/transcript/export?format=' + encodeURIComponent(fmt));
+            if (!res.ok) { showToast('❌ Export failed'); return; }
+            const blob = await res.blob();
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = 'transcript.' + fmt;
+            document.body.appendChild(a);
+            a.click();
+            a.remove();
+            URL.revokeObjectURL(url);
+            showToast('⬇ Transcript exported (' + fmt.toUpperCase() + ')');
+        } catch (e) {
+            showToast('❌ Export failed');
+        }
     }
 
     // ── Health Checks ────────────────────────────

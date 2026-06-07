@@ -304,6 +304,65 @@ async def api_transcript(request):
     return web.json_response({"transcript": state.transcript})
 
 
+def _fmt_srt_time(seconds: float) -> str:
+    seconds = max(0.0, seconds)
+    h = int(seconds // 3600)
+    m = int((seconds % 3600) // 60)
+    s = int(seconds % 60)
+    ms = int(round((seconds - int(seconds)) * 1000))
+    return f"{h:02d}:{m:02d}:{s:02d},{ms:03d}"
+
+
+def _build_transcript_txt(entries: list[dict]) -> str:
+    lines = [
+        "Church Live Translation — Transcript",
+        f"Generated: {time.strftime('%Y-%m-%d %H:%M:%S')}",
+        f"Segments: {len(entries)}",
+        "",
+    ]
+    for e in entries:
+        src = e.get("source") or e.get("ukrainian") or ""
+        tgt = e.get("translated") or e.get("english") or ""
+        lines.append(f"[#{e.get('seq', '?')}] {src}")
+        lines.append(f"        → {tgt}")
+        lines.append("")
+    return "\n".join(lines)
+
+
+def _build_transcript_srt(entries: list[dict]) -> str:
+    if not entries:
+        return ""
+    t0 = entries[0].get("timestamp") or 0.0
+    out: list[str] = []
+    for i, e in enumerate(entries):
+        start = (e.get("timestamp") or t0) - t0
+        if i + 1 < len(entries):
+            end = (entries[i + 1].get("timestamp") or (start + t0)) - t0
+        else:
+            end = start + 4.0
+        end = max(start + 1.0, min(end, start + 8.0))
+        tgt = e.get("translated") or e.get("english") or ""
+        out.extend([str(i + 1), f"{_fmt_srt_time(start)} --> {_fmt_srt_time(end)}", tgt, ""])
+    return "\n".join(out)
+
+
+async def api_export_transcript(request):
+    """Download the transcript as plain text (.txt) or subtitles (.srt)."""
+    fmt = request.query.get("format", "txt").lower()
+    entries = list(state.transcript)
+    if fmt == "srt":
+        body, ctype, fname = _build_transcript_srt(entries), "application/x-subrip", "transcript.srt"
+    else:
+        body, ctype, fname = _build_transcript_txt(entries), "text/plain; charset=utf-8", "transcript.txt"
+    return web.Response(
+        text=body,
+        headers={
+            "Content-Type": ctype,
+            "Content-Disposition": f'attachment; filename="{fname}"',
+        },
+    )
+
+
 async def api_start(request):
     """Start the translation pipeline."""
     if state.running:
@@ -1228,6 +1287,7 @@ async def _run_live_pipeline():
     """Background task running the live translation pipeline with dashboard integration."""
     playback_queue = None
     playback_task = None
+    watchdog_task = None
     processing_tasks = set()
     playback_active = False
     try:
@@ -1430,6 +1490,62 @@ async def _run_live_pipeline():
 
         playback_task = asyncio.create_task(_playback_worker())
 
+        # Surface API failures to the operator, throttled so a sustained outage
+        # (bad key, exhausted quota, network down) doesn't spam the UI.
+        api_error_state = {"last_ts": 0.0, "count": 0}
+
+        async def report_api_error(stage: str, detail: str):
+            api_error_state["count"] += 1
+            now = time.monotonic()
+            if now - api_error_state["last_ts"] < 15.0:
+                return
+            api_error_state["last_ts"] = now
+            short = (detail or "").strip().splitlines()[0][:160] if detail else "unknown error"
+            logger.error("%s API error (#%d): %s", stage, api_error_state["count"], short)
+            await broadcast({
+                "type": "error",
+                "message": f"{stage} error — check API key, quota, and network. ({short})",
+            })
+
+        async def _device_watchdog():
+            """Detect a stalled/disconnected mic and try to recover it.
+
+            A healthy input stream fires its callback continuously, so a long
+            gap means the device stalled or was unplugged. We alert the
+            operator and keep trying to re-open it until audio resumes.
+            """
+            STALL_SEC = 6.0
+            announced_down = False
+            await asyncio.sleep(STALL_SEC)  # warm-up grace period
+            while state.live_running:
+                try:
+                    if capture.seconds_since_audio() > STALL_SEC:
+                        if not announced_down:
+                            await broadcast({
+                                "type": "error",
+                                "message": "No audio from microphone — attempting to reconnect…",
+                            })
+                            announced_down = True
+                        try:
+                            await capture.restart()
+                            await asyncio.sleep(STALL_SEC)
+                            if capture.seconds_since_audio() <= STALL_SEC:
+                                await broadcast({"type": "info", "message": "Microphone reconnected."})
+                                announced_down = False
+                        except Exception as e:
+                            await broadcast({
+                                "type": "error",
+                                "message": f"Microphone unavailable — check the device. ({e})",
+                            })
+                            await asyncio.sleep(5.0)
+                except asyncio.CancelledError:
+                    raise
+                except Exception as e:
+                    logger.debug("Device watchdog error: %s", e)
+                await asyncio.sleep(2.0)
+
+        watchdog_task = asyncio.create_task(_device_watchdog())
+
         async def _process_chunk(wav_bytes, seq, pre_transcribed=None):
             """Process a single chunk: STT → Translate → TTS → slot.
             
@@ -1453,6 +1569,8 @@ async def _run_live_pipeline():
                 else:
                     src_text = await asyncio.wait_for(transcriber.transcribe(wav_bytes), timeout=20.0)
                 if not src_text:
+                    if getattr(transcriber, "last_error", None):
+                        await report_api_error("Speech-to-text", transcriber.last_error)
                     return
 
                 await broadcast({
@@ -1465,6 +1583,8 @@ async def _run_live_pipeline():
                 # Translate
                 tgt_text = await asyncio.wait_for(translator.translate(src_text), timeout=20.0)
                 if not tgt_text:
+                    if getattr(translator, "last_error", None):
+                        await report_api_error("Translation", translator.last_error)
                     return
 
                 latency = time.time() - t0
@@ -1505,6 +1625,9 @@ async def _run_live_pipeline():
                         logger.info("[Chunk %d] TTS first audio in %.2fs", seq, tts_time_to_first)
                         tts_started = True
                     await slot.put(audio_chunk)
+
+                if not tts_started and getattr(synthesizer, "last_error", None):
+                    await report_api_error("Voice synthesis", synthesizer.last_error)
 
             except asyncio.TimeoutError as exc:
                 logger.warning("[Chunk %d] Processing timed out: %s", seq, exc)
@@ -1623,6 +1746,12 @@ async def _run_live_pipeline():
         if playback_task:
             with contextlib.suppress(asyncio.CancelledError, Exception):
                 await playback_task
+
+        # Stop the device watchdog
+        if watchdog_task and not watchdog_task.done():
+            watchdog_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await watchdog_task
 
         # Ensure all audio resources are released
         if state.live_capture:
@@ -1794,6 +1923,7 @@ def create_app():
     app.router.add_get("/ws", websocket_handler)
     app.router.add_get("/api/status", api_status)
     app.router.add_get("/api/transcript", api_transcript)
+    app.router.add_get("/api/transcript/export", api_export_transcript)
     app.router.add_post("/api/start", api_start)
     app.router.add_post("/api/stop", api_stop)
     app.router.add_post("/api/test-file", api_test_file)

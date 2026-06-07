@@ -455,3 +455,25 @@ async def test_apply_flags_restart_on_device_change(monkeypatch):
 
     assert payload["restart_needed"] is True
     assert "device" in payload["restart_reason"]
+
+
+# ── Transcript export ─────────────────────────────────────────────────
+
+@pytest.mark.asyncio
+async def test_export_transcript_txt_and_srt():
+    from dashboard import server
+
+    server.state.transcript = [
+        {"seq": 1, "source": "Привіт", "translated": "Hello", "timestamp": 1000.0},
+        {"seq": 2, "source": "світ", "translated": "World", "timestamp": 1003.0},
+    ]
+
+    txt = await server.api_export_transcript(DummyRequest("/api/transcript/export", query={"format": "txt"}))
+    assert txt.status == 200
+    assert "Hello" in txt.text and "[#1]" in txt.text
+    assert txt.headers["Content-Disposition"].endswith('transcript.txt"')
+
+    srt = await server.api_export_transcript(DummyRequest("/api/transcript/export", query={"format": "srt"}))
+    assert srt.status == 200
+    assert "-->" in srt.text and "World" in srt.text
+    assert "00:00:00,000 --> 00:00:03,000" in srt.text
