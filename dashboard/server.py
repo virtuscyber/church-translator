@@ -908,7 +908,11 @@ def _apply_to_live_components(data: dict) -> list[str]:
         transcriber.model = data["stt_model"]
         applied.append("STT model")
     if "source_language" in data and transcriber is not None:
-        transcriber.language = data["source_language"]
+        from src.transcriber import stt_anchor_prompt
+        code = str(data["source_language"]).strip().lower()
+        transcriber.language = code
+        # Re-anchor STT to the new source language so it isn't mis-detected.
+        transcriber.prompt = stt_anchor_prompt(code)
         if translator is not None:
             translator.source_language = _language_name(data["source_language"])
         applied.append("source language")
