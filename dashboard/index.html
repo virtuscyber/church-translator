@@ -838,9 +838,10 @@
                 <label>🎧 Speech-to-Text Provider</label>
                 <select id="sttProvider">
                     <option value="elevenlabs">ElevenLabs Scribe v2 (best for Ukrainian)</option>
+                    <option value="deepgram">Deepgram Nova-3 (fast, needs DEEPGRAM_API_KEY)</option>
                     <option value="openai">OpenAI (gpt-4o-transcribe / Whisper)</option>
                 </select>
-                <div class="model-note" style="font-size:0.75em;color:var(--text-dim);margin-top:2px;">Scribe v2 has the lowest Ukrainian error rate. The OpenAI model below is used when provider = OpenAI (and as automatic fallback).</div>
+                <div class="model-note" style="font-size:0.75em;color:var(--text-dim);margin-top:2px;">Scribe v2 has the lowest Ukrainian error rate; Deepgram Nova-3 is a fast alternative. The OpenAI model below is used when provider = OpenAI (and as automatic fallback).</div>
             </div>
             <div class="form-group">
                 <label>🧠 OpenAI STT Model</label>

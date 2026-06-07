@@ -55,6 +55,8 @@ class Transcriber:
         provider: str = "openai",
         elevenlabs_api_key: str = "",
         elevenlabs_model: str = "scribe_v2",
+        deepgram_api_key: str = "",
+        deepgram_model: str = "nova-3",
     ):
         # Client-level timeout + retries give automatic exponential backoff on
         # transient failures (429/5xx/network) so a blip doesn't drop a chunk.
@@ -72,10 +74,13 @@ class Transcriber:
         self.min_duration_sec = min_duration_sec
         self.filter_hallucinations = filter_hallucinations
         self.timeout = timeout
-        # STT provider: "openai" or "elevenlabs" (Scribe v2 — best Ukrainian WER).
+        # STT provider: "openai", "elevenlabs" (Scribe v2 — best Ukrainian WER),
+        # or "deepgram" (Nova-3). Non-OpenAI providers fall back to OpenAI.
         self.provider = provider
         self.elevenlabs_api_key = elevenlabs_api_key
         self.elevenlabs_model = elevenlabs_model
+        self.deepgram_api_key = deepgram_api_key
+        self.deepgram_model = deepgram_model
         # Set to the error string when a transcription raises, else None. Lets
         # callers tell "API failed" apart from "no speech" (both return None).
         self.last_error: Optional[str] = None
@@ -120,12 +125,20 @@ class Transcriber:
         Returns the raw transcript text (may be empty), or None on hard failure
         (in which case ``last_error`` is set).
         """
-        providers = ["elevenlabs", "openai"] if self.provider == "elevenlabs" else ["openai"]
+        # Non-OpenAI providers always fall back to OpenAI on failure.
+        order = {
+            "openai": ["openai"],
+            "elevenlabs": ["elevenlabs", "openai"],
+            "deepgram": ["deepgram", "openai"],
+        }
+        providers = order.get(self.provider, ["openai"])
         last_exc: Optional[Exception] = None
         for i, prov in enumerate(providers):
             try:
                 if prov == "elevenlabs":
                     return await self._transcribe_elevenlabs(wav_bytes)
+                if prov == "deepgram":
+                    return await self._transcribe_deepgram(wav_bytes)
                 return await self._transcribe_openai(wav_bytes)
             except Exception as e:
                 last_exc = e
@@ -179,4 +192,39 @@ class Transcriber:
                     raise RuntimeError(f"ElevenLabs STT HTTP {resp.status}: {body[:200]}")
                 data = await resp.json()
         return (data.get("text") or "").strip()
+
+    async def _transcribe_deepgram(self, wav_bytes: bytes) -> str:
+        """Transcribe one chunk via Deepgram (pre-recorded REST). Raises on error.
+
+        Deepgram Nova-3 supports Ukrainian; ``language`` enforces the source so
+        it isn't mis-detected. Audio is sent as raw WAV bytes.
+        """
+        import aiohttp
+
+        url = "https://api.deepgram.com/v1/listen"
+        params = {
+            "model": self.deepgram_model,
+            "smart_format": "true",
+            "punctuate": "true",
+        }
+        if self.language:
+            params["language"] = self.language
+
+        timeout = aiohttp.ClientTimeout(total=self.timeout)
+        headers = {
+            "Authorization": f"Token {self.deepgram_api_key}",
+            "Content-Type": "audio/wav",
+        }
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.post(url, params=params, data=wav_bytes, headers=headers) as resp:
+                if resp.status != 200:
+                    body = await resp.text()
+                    raise RuntimeError(f"Deepgram STT HTTP {resp.status}: {body[:200]}")
+                data = await resp.json()
+        try:
+            return (
+                data["results"]["channels"][0]["alternatives"][0]["transcript"] or ""
+            ).strip()
+        except (KeyError, IndexError, TypeError):
+            return ""
 

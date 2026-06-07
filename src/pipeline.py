@@ -59,6 +59,8 @@ class TranslationPipeline:
             provider=config.transcription.provider,
             elevenlabs_api_key=config.elevenlabs_api_key,
             elevenlabs_model=config.transcription.elevenlabs_model,
+            deepgram_api_key=config.deepgram_api_key,
+            deepgram_model=config.transcription.deepgram_model,
         )
 
         self.translator = Translator(
