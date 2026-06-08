@@ -1113,6 +1113,7 @@
                 <div class="step-dot active" id="stepDot1"></div>
                 <div class="step-dot" id="stepDot2"></div>
                 <div class="step-dot" id="stepDot3"></div>
+                <div class="step-dot" id="stepDot4"></div>
             </div>
 
             <!-- Step 1: OpenAI Key -->
@@ -1156,6 +1157,15 @@
                         <select id="wizTargetLang"></select>
                     </div>
                 </div>
+            </div>
+
+            <!-- Step 4: Test setup (optional) -->
+            <div class="wizard-step" id="wizStep4">
+                <div class="step-title">Step 4: Test Your Setup <span class="optional-badge">Optional</span></div>
+                <div class="step-desc">Optionally run one real call per provider you configured to confirm your keys and the streaming sockets work. Costs a few cents — or just click <b>Save &amp; Start</b> to skip.</div>
+                <button class="btn btn-secondary" id="wizSmokeRunBtn" onclick="runSmokeFromWizard()">▶ Test my setup</button>
+                <div id="wizSmokeSummary" style="font-size:0.85em;color:var(--text-dim);margin-top:8px;"></div>
+                <div id="wizSmokeResults" style="margin-top:8px;display:flex;flex-direction:column;gap:6px;"></div>
             </div>
         </div>
         <div class="modal-footer">
@@ -2009,9 +2019,11 @@
         document.getElementById('wizardOverlay').classList.remove('active');
     }
 
+    const WIZARD_STEPS = 4;
+
     function setWizardStep(step) {
         wizardStep = step;
-        for (let i = 1; i <= 3; i++) {
+        for (let i = 1; i <= WIZARD_STEPS; i++) {
             document.getElementById('wizStep' + i).classList.toggle('active', i === step);
             const dot = document.getElementById('stepDot' + i);
             dot.className = 'step-dot';
@@ -2020,7 +2032,7 @@
         }
         document.getElementById('wizBackBtn').style.visibility = step === 1 ? 'hidden' : 'visible';
         const nextBtn = document.getElementById('wizNextBtn');
-        if (step === 3) {
+        if (step === WIZARD_STEPS) {
             nextBtn.textContent = '✓ Save & Start';
             nextBtn.className = 'btn btn-success';
         } else {
@@ -2030,11 +2042,33 @@
     }
 
     function wizardNext() {
-        if (wizardStep < 3) {
+        if (wizardStep < WIZARD_STEPS) {
             setWizardStep(wizardStep + 1);
         } else {
             saveWizard();
         }
+    }
+
+    // Wizard "Test my setup": persist the keys just entered, then run the
+    // live smoke so it tests THIS configuration (not whatever was in .env).
+    async function runSmokeFromWizard() {
+        const btn = document.getElementById('wizSmokeRunBtn');
+        if (btn) { btn.disabled = true; btn.textContent = '⏳ Saving keys…'; }
+        document.getElementById('wizSmokeResults').innerHTML = '';
+        document.getElementById('wizSmokeSummary').textContent = '';
+        try {
+            await apiFetch('/api/setup/save', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({
+                    openai_api_key: document.getElementById('wizOpenaiKey').value.trim(),
+                    elevenlabs_api_key: document.getElementById('wizElevenlabsKey').value.trim(),
+                    deepgram_api_key: document.getElementById('wizDeepgramKey').value.trim(),
+                }),
+            });
+        } catch (e) { /* non-fatal; run against whatever is saved */ }
+        if (btn) btn.textContent = '⏳ Testing…';
+        await runSmokeTest();  // streams results into both panels
     }
 
     function wizardBack() {
@@ -2382,65 +2416,88 @@
     // ── Live API smoke test ───────────────────────
     const SMOKE_ICON = {pass: '✅', fail: '❌', skip: '⚪', running: '⏳'};
 
-    function smokeRow(id) {
-        let row = document.getElementById('smokeRow_' + id);
+    // Render targets: the standalone panel, plus the wizard step when it's open.
+    function smokeTargets() {
+        const targets = [{results: 'smokeResults', summary: 'smokeSummary'}];
+        const overlay = document.getElementById('wizardOverlay');
+        if (overlay && overlay.classList.contains('active')) {
+            targets.push({results: 'wizSmokeResults', summary: 'wizSmokeSummary'});
+        }
+        return targets.filter(t => document.getElementById(t.results));
+    }
+
+    function smokeRowIn(containerId, id) {
+        const container = document.getElementById(containerId);
+        let row = container.querySelector('[data-smk="' + id + '"]');
         if (!row) {
             row = document.createElement('div');
-            row.id = 'smokeRow_' + id;
+            row.setAttribute('data-smk', id);
             row.style.cssText = 'display:flex;align-items:center;gap:8px;font-size:0.9em;';
             row.innerHTML = '<span class="smk-icon"></span><span class="smk-label" style="flex:1;"></span>'
                           + '<span class="smk-detail" style="color:var(--text-dim);font-size:0.85em;text-align:right;max-width:55%;"></span>';
-            document.getElementById('smokeResults').appendChild(row);
+            container.appendChild(row);
         }
         return row;
     }
 
     function handleSmokeEvent(ev) {
-        if (ev.phase === 'begin') {
-            document.getElementById('smokeResults').innerHTML = '';
-            document.getElementById('smokeSummary').textContent = 'Running…';
-            return;
+        for (const t of smokeTargets()) {
+            const summaryEl = document.getElementById(t.summary);
+            if (ev.phase === 'begin') {
+                document.getElementById(t.results).innerHTML = '';
+                if (summaryEl) summaryEl.textContent = 'Running…';
+                continue;
+            }
+            if (ev.phase === 'error') {
+                if (summaryEl) summaryEl.textContent = '⚠ ' + (ev.detail || 'error');
+                continue;
+            }
+            if (ev.phase === 'done') {
+                if (summaryEl) summaryEl.textContent =
+                    `${ev.passed} passed · ${ev.failed} failed · ${ev.skipped} skipped`;
+                continue;
+            }
+            const row = smokeRowIn(t.results, ev.id);
+            row.querySelector('.smk-label').textContent = ev.label;
+            if (ev.phase === 'start') {
+                row.querySelector('.smk-icon').textContent = SMOKE_ICON.running;
+                row.querySelector('.smk-detail').textContent = '';
+            } else if (ev.phase === 'result') {
+                row.querySelector('.smk-icon').textContent = SMOKE_ICON[ev.status] || '•';
+                const secs = ev.elapsed ? ` (${ev.elapsed}s)` : '';
+                row.querySelector('.smk-detail').textContent = (ev.detail || '') + secs;
+            }
         }
-        if (ev.phase === 'error') {
-            document.getElementById('smokeSummary').textContent = '⚠ ' + (ev.detail || 'error');
+        if (ev.phase === 'error' || ev.phase === 'done') {
             setSmokeRunning(false);
-            return;
-        }
-        if (ev.phase === 'done') {
-            document.getElementById('smokeSummary').textContent =
-                `${ev.passed} passed · ${ev.failed} failed · ${ev.skipped} skipped`;
-            setSmokeRunning(false);
-            showToast(ev.failed ? `❌ Live test: ${ev.failed} failed` : '✅ Live API test passed');
-            return;
-        }
-        const row = smokeRow(ev.id);
-        row.querySelector('.smk-label').textContent = ev.label;
-        if (ev.phase === 'start') {
-            row.querySelector('.smk-icon').textContent = SMOKE_ICON.running;
-            row.querySelector('.smk-detail').textContent = '';
-        } else if (ev.phase === 'result') {
-            row.querySelector('.smk-icon').textContent = SMOKE_ICON[ev.status] || '•';
-            const secs = ev.elapsed ? ` (${ev.elapsed}s)` : '';
-            row.querySelector('.smk-detail').textContent = (ev.detail || '') + secs;
+            if (ev.phase === 'done') {
+                showToast(ev.failed ? `❌ Live test: ${ev.failed} failed` : '✅ Live API test passed');
+            }
         }
     }
 
     function setSmokeRunning(running) {
-        const btn = document.getElementById('smokeRunBtn');
-        if (!btn) return;
-        btn.disabled = running;
-        btn.textContent = running ? '⏳ Running…' : '▶ Run live API test';
+        const main = document.getElementById('smokeRunBtn');
+        if (main) { main.disabled = running; main.textContent = running ? '⏳ Running…' : '▶ Run live API test'; }
+        const wiz = document.getElementById('wizSmokeRunBtn');
+        if (wiz) { wiz.disabled = running; wiz.textContent = running ? '⏳ Testing…' : '▶ Test my setup'; }
     }
 
     async function runSmokeTest() {
         setSmokeRunning(true);
-        document.getElementById('smokeResults').innerHTML = '';
-        document.getElementById('smokeSummary').textContent = 'Starting…';
+        for (const t of smokeTargets()) {
+            document.getElementById(t.results).innerHTML = '';
+            const s = document.getElementById(t.summary);
+            if (s) s.textContent = 'Starting…';
+        }
         try {
             const res = await apiFetch('/api/smoke/run', {method: 'POST'});
             const data = await res.json().catch(() => ({}));
             if (!res.ok || !data.ok) {
-                document.getElementById('smokeSummary').textContent = data.error || 'Could not start';
+                for (const t of smokeTargets()) {
+                    const s = document.getElementById(t.summary);
+                    if (s) s.textContent = data.error || 'Could not start';
+                }
                 showToast('❌ ' + (data.error || 'Could not start live test'));
                 setSmokeRunning(false);
             }
