@@ -9,4 +9,5 @@ dist/
 recordings/
 output/
 samples/
+logs/
 config.json

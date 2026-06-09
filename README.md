@@ -81,8 +81,9 @@ Ukrainian · Russian · English · Spanish · Portuguese · French · German · 
 | **3 STT providers (chunked)** | ElevenLabs Scribe v2 (best Ukrainian accuracy), Deepgram Nova-3, OpenAI `gpt-4o-transcribe` — with automatic OpenAI fallback. |
 | **Anti-hallucination** | Silence gating, known-artifact filtering, repetition-loop detection, source-language anchoring — so dead air never becomes phantom text. |
 | **Live tuning** | Adjust quality, VAD, reliability, TTS speed, and AES67 settings **mid-service** with no restart. |
-| **Resilience** | Bounded retries with backoff, per-request timeouts, and sustained-failure alerts surfaced in the dashboard. |
-| **Mic-drop recovery** | A watchdog detects a stalled/unplugged device within seconds and auto-reconnects. |
+| **Clean audio path** | Anti-aliased resampling at every rate conversion, a jitter buffer so streamed TTS never stutters mid-sentence, and TTS prosody that carries across sentences. |
+| **Resilience** | Bounded retries with backoff, per-request timeouts, bounded queues/buffers everywhere, and sustained-failure alerts surfaced in the dashboard. One stalled dashboard client can never hold up the live audio. |
+| **Mic & speaker recovery** | A watchdog detects a stalled/unplugged mic within seconds and auto-reconnects; a failed speaker write reopens the output device and retries. |
 | **Transcript export** | One-click **TXT** / **SRT** download for service records or captions. |
 | **Pro audio output** | Local speakers, Dante Via, and a **drift-free AES67** RTP multicast (SAP/SDP announced). |
 | **Multi-language out** | One source → several target-language streams simultaneously. |
@@ -101,6 +102,8 @@ The defaults track the best current real-time models, and every choice is a drop
 | **Text-to-speech** | **ElevenLabs Flash v2.5** (~75 ms) | `eleven_v3` (most expressive) · Multilingual v2 · Turbo v2.5 · OpenAI `gpt-4o-mini-tts` |
 
 > 💡 **⚡ True streaming** holds a socket open so the provider does the endpointing and **interim words show live**. Turn it off (or pick a chunked provider) to trade streaming latency for top accuracy. **TTS speed** is tunable live (~1.1–1.15 keeps the translation pacing the speaker).
+>
+> 🗣️ Each ElevenLabs TTS request includes the previously spoken sentence as prosody context (`previous_text`), so intonation flows across sentences instead of every chunk restarting cold. Translation likewise replays recent source→translation pairs as real conversation turns, keeping terminology and pronouns consistent.
 
 ---
 
@@ -324,8 +327,9 @@ STT models invent confident text when fed silence, noise, or music ("thank you f
 | **VAD chunker** | `src/vad_chunker.py` | Energy VAD with adaptive noise floor + smart silence-gap splitting |
 | **VAD capture** | `src/vad_capture.py` | Async capture, preview snapshots, raw-PCM streaming tap, device watchdog |
 | **Transcriber** | `src/transcriber.py` | Multi-provider chunked STT with anti-hallucination + OpenAI fallback |
-| **Translator** | `src/translator.py` | GPT-4o translation with rolling context |
-| **Synthesizer** | `src/synthesizer.py` | Streaming/batch TTS (ElevenLabs + OpenAI) with retry/fallback |
+| **Translator** | `src/translator.py` | GPT-4o translation with conversation-history context |
+| **Synthesizer** | `src/synthesizer.py` | Streaming/batch TTS (ElevenLabs + OpenAI) with prosody continuity, retry/fallback |
+| **Resampler** | `src/audio_resample.py` | Anti-aliased rate conversion (one-shot + stateful streaming) |
 | **AES67 sender** | `src/aes67_output.py` | Drift-free RTP multicast with SAP/SDP announcements |
 | **Hallucination** | `src/hallucination.py` | Silence gate, artifact filter, repetition detection |
 | **Dashboard** | `dashboard/server.py` | Web UI, API, pipeline orchestration, live WebSocket updates |
@@ -362,6 +366,12 @@ python scripts/smoke_live.py
 
 Or do it from the dashboard: **🔬 Live API Test → Run** shows each check live (✅ / ❌ / ⚪)
 with timing and the actual transcript/translation it got back. (Stop live translation first.)
+
+### Logs
+
+The dashboard writes rotating logs to **`logs/dashboard.log`** (≈10 MB retained), so a
+problem during a service can still be diagnosed afterwards — check there first when
+reporting an issue.
 
 ---
 

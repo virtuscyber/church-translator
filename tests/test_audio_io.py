@@ -50,6 +50,45 @@ async def test_audio_playback_logs_failures(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_audio_playback_recovers_from_one_write_failure(monkeypatch):
+    """A failed device write reopens the stream once and retries the audio —
+    so an unplugged/re-enumerated speaker doesn't silence the rest of the
+    service the way it used to."""
+    streams = []
+
+    class FlakyOutputStream:
+        def __init__(self):
+            self.writes = []
+            self.broken = len(streams) == 0  # first stream fails, second works
+        def start(self): pass
+        def stop(self): pass
+        def close(self): pass
+        def write(self, data):
+            if self.broken:
+                raise RuntimeError("device gone")
+            self.writes.append(data)
+
+    class FakeSoundDevice:
+        def check_output_settings(self, **kw):
+            pass
+        def query_devices(self, *a, **kw):
+            return {"default_samplerate": 24000}
+        def OutputStream(self, **kw):
+            stream = FlakyOutputStream()
+            streams.append(stream)
+            return stream
+
+    monkeypatch.setattr('src.audio_playback._load_sounddevice', lambda: FakeSoundDevice())
+
+    playback = AudioPlayback(sample_rate=24000)
+    await playback.play(np.array([0, 100, -100], dtype=np.int16).tobytes())
+    await playback.close()
+
+    assert len(streams) == 2          # reopened after the failure
+    assert len(streams[1].writes) == 1  # and the audio was retried, not lost
+
+
+@pytest.mark.asyncio
 async def test_audio_playback_resamples(monkeypatch):
     """When device doesn't support source rate, playback resamples."""
     written_data = []

@@ -40,15 +40,29 @@ class Translator:
         self.target_language = target_language
         # Error string when a translation raises, else None (see Transcriber).
         self.last_error: Optional[str] = None
-        self._context: deque[str] = deque(maxlen=context_sentences)
+        # Sliding window of (source, translation) pairs, replayed as real
+        # user/assistant turns so the model keeps terminology, pronouns, and
+        # tone consistent across chunks without re-translating old text.
+        self._history: deque[tuple[str, str]] = deque(maxlen=context_sentences)
+
+    def reset_context(self) -> None:
+        """Forget previous chunks (call when the language pair changes)."""
+        self._history.clear()
+
+    def _request_text(self, text: str) -> str:
+        return (
+            f"Translate the following {self.source_language} speech to "
+            f"{self.target_language}:\n\n{text}"
+        )
 
     async def translate(self, ukrainian_text: str) -> Optional[str]:
         """Translate source-language text to the target language with biblical tone.
 
-        Maintains a sliding window of previous translations for context
-        continuity. Junk input is rejected up front, and the model's output is
-        filtered for hallucination artifacts before being returned or stored as
-        context — so a single bad chunk cannot poison later translations.
+        Maintains a sliding window of previous (source, translation) pairs for
+        context continuity. Junk input is rejected up front, and the model's
+        output is filtered for hallucination artifacts before being returned or
+        stored as context — so a single bad chunk cannot poison later
+        translations.
 
         Args:
             ukrainian_text: Ukrainian text to translate.
@@ -70,27 +84,15 @@ class Translator:
 
         self.last_error = None
         try:
-            # Provide previous translations purely as reference for continuity.
-            # The system prompt instructs the model never to re-translate or
-            # continue this block.
-            context_block = ""
-            if self._context:
-                prev = " ".join(self._context)
-                context_block = (
-                    f"\n\n[Reference only — previously translated, do NOT repeat "
-                    f"or continue: {prev}]"
-                )
-
-            messages = [
-                {"role": "system", "content": self.system_prompt},
-                {
-                    "role": "user",
-                    "content": (
-                        f"Translate the following {self.source_language} speech to "
-                        f"{self.target_language}:{context_block}\n\n{clean_input}"
-                    ),
-                },
-            ]
+            # Replay recent chunks as genuine conversation turns. The model
+            # sees exactly how the previous source text was rendered, which is
+            # both a stronger continuity signal and far less likely to be
+            # re-translated than context pasted into the request itself.
+            messages = [{"role": "system", "content": self.system_prompt}]
+            for prev_src, prev_tgt in self._history:
+                messages.append({"role": "user", "content": self._request_text(prev_src)})
+                messages.append({"role": "assistant", "content": prev_tgt})
+            messages.append({"role": "user", "content": self._request_text(clean_input)})
 
             response = await self.client.chat.completions.create(
                 model=self.model,
@@ -110,8 +112,8 @@ class Translator:
                 if not english_text:
                     return None
 
-            # Store only clean output for context continuity.
-            self._context.append(english_text)
+            # Store only clean pairs for context continuity.
+            self._history.append((clean_input, english_text))
 
             logger.info("Translated: %s", english_text[:80] + ("..." if len(english_text) > 80 else ""))
             return english_text

@@ -60,6 +60,7 @@ def reset_dashboard_state(monkeypatch, tmp_path):
     server.state.live_capture = None
     server.state.live_playback = None
     server.state.live_aes67 = None
+    server.state.live_streaming_active = False
     server.state.audio_monitor_lock = asyncio.Lock()
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     monkeypatch.delenv("ELEVENLABS_API_KEY", raising=False)

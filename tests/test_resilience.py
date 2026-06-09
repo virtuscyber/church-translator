@@ -78,6 +78,59 @@ async def test_translator_no_error_on_filtered_junk():
     assert tr.client.chat.completions.create.await_count == 0
 
 
+# ── Translator conversation-history context ───────────────────────────
+
+def _completion(text: str):
+    msg = MagicMock()
+    msg.choices = [MagicMock()]
+    msg.choices[0].message.content = text
+    return msg
+
+
+@pytest.mark.asyncio
+async def test_translator_replays_history_as_conversation_turns():
+    tr = Translator(api_key="x", system_prompt="sp", context_sentences=2)
+    tr.client = MagicMock()
+    tr.client.chat.completions.create = AsyncMock(
+        side_effect=[_completion("First."), _completion("Second.")]
+    )
+
+    assert await tr.translate("Перший") == "First."
+    assert await tr.translate("Другий") == "Second."
+
+    # The second call must carry the first chunk as a real user/assistant pair.
+    messages = tr.client.chat.completions.create.await_args.kwargs["messages"]
+    roles = [m["role"] for m in messages]
+    assert roles == ["system", "user", "assistant", "user"]
+    assert "Перший" in messages[1]["content"]
+    assert messages[2]["content"] == "First."
+    assert "Другий" in messages[3]["content"]
+    # The newest request must be the only untranslated turn.
+    assert "Перший" not in messages[3]["content"]
+
+
+@pytest.mark.asyncio
+async def test_translator_history_is_bounded_and_resettable():
+    tr = Translator(api_key="x", system_prompt="sp", context_sentences=2)
+    tr.client = MagicMock()
+    tr.client.chat.completions.create = AsyncMock(
+        side_effect=[_completion(f"T{i}") for i in range(5)]
+    )
+
+    for i in range(4):
+        await tr.translate(f"Речення номер {i}")
+
+    messages = tr.client.chat.completions.create.await_args.kwargs["messages"]
+    # maxlen=2 → system + 2 pairs + new request = 6 messages, oldest aged out.
+    assert len(messages) == 6
+    assert all("Речення номер 0" not in m["content"] for m in messages)
+
+    tr.reset_context()
+    await tr.translate("Нове речення")
+    messages = tr.client.chat.completions.create.await_args.kwargs["messages"]
+    assert [m["role"] for m in messages] == ["system", "user"]
+
+
 # ── Synthesizer retry + error signal ──────────────────────────────────
 
 @pytest.mark.asyncio
@@ -298,6 +351,111 @@ async def test_transcribe_elevenlabs_builds_correct_request(monkeypatch):
     # model_id + language_code were added to the multipart form
     field_names = {f[0].get("name") for f in captured["data"]._fields}
     assert "model_id" in field_names and "language_code" in field_names and "file" in field_names
+
+
+# ── ElevenLabs TTS over REST (streaming + prosody continuity) ─────────
+
+def _fake_tts_http(monkeypatch, captured: dict, pcm: bytes = b"\x00" * 9600):
+    """Patch aiohttp so ElevenLabs TTS calls hit a canned PCM response."""
+    import aiohttp
+
+    class FakeContent:
+        def iter_chunked(self, size):
+            async def gen():
+                for i in range(0, len(pcm), size):
+                    yield pcm[i:i + size]
+            return gen()
+
+    class FakeResp:
+        status = 200
+        content = FakeContent()
+        async def text(self):
+            return ""
+        async def __aenter__(self):
+            return self
+        async def __aexit__(self, *a):
+            return False
+
+    class FakeSession:
+        def __init__(self, *a, **k):
+            pass
+        async def __aenter__(self):
+            return self
+        async def __aexit__(self, *a):
+            return False
+        def post(self, url, params=None, json=None, headers=None):
+            captured["url"] = url
+            captured["params"] = params
+            captured["json"] = json
+            captured["headers"] = headers
+            return FakeResp()
+
+    monkeypatch.setattr(aiohttp, "ClientSession", FakeSession)
+
+
+@pytest.mark.asyncio
+async def test_tts_elevenlabs_builds_correct_request(monkeypatch):
+    captured = {}
+    _fake_tts_http(monkeypatch, captured)
+
+    s = Synthesizer(provider="elevenlabs", elevenlabs_api_key="EL_KEY",
+                    elevenlabs_voice_id="voice123", speed=1.1)
+    audio = await s.synthesize("Glory to God.")
+
+    assert audio == b"\x00" * 9600
+    assert captured["url"] == "https://api.elevenlabs.io/v1/text-to-speech/voice123/stream"
+    assert captured["params"] == {"output_format": "pcm_24000"}
+    assert captured["headers"]["xi-api-key"] == "EL_KEY"
+    body = captured["json"]
+    assert body["text"] == "Glory to God."
+    assert body["model_id"] == "eleven_flash_v2_5"
+    assert body["voice_settings"]["speed"] == 1.1
+    # First utterance — no prosody context yet.
+    assert "previous_text" not in body
+
+
+@pytest.mark.asyncio
+async def test_tts_elevenlabs_carries_previous_text_for_prosody(monkeypatch):
+    captured = {}
+    _fake_tts_http(monkeypatch, captured)
+
+    s = Synthesizer(provider="elevenlabs", elevenlabs_api_key="k")
+    await s.synthesize("First sentence.")
+    await s.synthesize("Second sentence.")
+
+    assert captured["json"]["previous_text"] == "First sentence."
+
+
+@pytest.mark.asyncio
+async def test_tts_elevenlabs_stream_yields_chunks(monkeypatch):
+    captured = {}
+    _fake_tts_http(monkeypatch, captured, pcm=b"\x01" * 5000)
+
+    s = Synthesizer(provider="elevenlabs", elevenlabs_api_key="k")
+    chunks = [c async for c in s.synthesize_stream("Hello")]
+
+    assert b"".join(chunks) == b"\x01" * 5000
+    assert len(chunks) >= 2  # streamed, not one blob
+    assert s.last_error is None
+
+
+@pytest.mark.asyncio
+async def test_tts_stream_falls_back_to_openai_batch(monkeypatch):
+    s = Synthesizer(provider="elevenlabs", elevenlabs_api_key="k")
+
+    async def boom(text):
+        raise RuntimeError("el down")
+        yield b""  # pragma: no cover — makes this an async generator
+
+    async def openai_ok(text):
+        return b"OPENAI-PCM"
+
+    s._stream_elevenlabs = boom
+    s._synthesize_openai = openai_ok
+
+    chunks = [c async for c in s.synthesize_stream("Hello")]
+    assert chunks == [b"OPENAI-PCM"]
+    assert s.last_error is None
 
 
 # ── Deepgram Nova-3 STT provider ──────────────────────────────────────
