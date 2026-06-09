@@ -174,6 +174,9 @@ class AppState:
         self.live_translator = None
         self.live_synthesizer = None
         self.live_settings: dict = {}
+        # True while the running session uses a true-streaming STT socket —
+        # engine-affecting changes then need a restart, not a hot-swap.
+        self.live_streaming_active: bool = False
         # Live-tunable runtime knobs (quality/VAD/reliability). Shared with the
         # watchdog so threshold changes take effect without a restart.
         self.live_tuning: dict = {}
@@ -196,17 +199,37 @@ def _append_transcript(entry: dict) -> None:
         del state.transcript[:-MAX_TRANSCRIPT_ENTRIES]
 
 
+# Per-client send timeout for broadcasts. The live pipeline awaits broadcast()
+# on its hot path, so a single stalled client (sleeping laptop, dead TCP
+# session) must never be able to hold up translation for everyone else.
+_BROADCAST_SEND_TIMEOUT = 2.0
+
+
 async def broadcast(msg: dict):
-    """Send a message to all connected WebSocket clients."""
+    """Send a message to all connected WebSocket clients.
+
+    Sends run concurrently with a short per-client timeout; clients that fail
+    or stall are dropped and closed — the dashboard UI auto-reconnects and
+    re-syncs from the ``init`` snapshot.
+    """
     data = json.dumps(msg)
-    dead = []
-    for ws in list(state.connected_clients):
+    clients = list(state.connected_clients)
+    if not clients:
+        return
+
+    async def _send(ws) -> bool:
         try:
-            await ws.send_str(data)
+            await asyncio.wait_for(ws.send_str(data), _BROADCAST_SEND_TIMEOUT)
+            return True
         except Exception:
-            dead.append(ws)
-    for ws in dead:
-        _discard_client(ws)
+            return False
+
+    results = await asyncio.gather(*(_send(ws) for ws in clients))
+    for ws, ok in zip(clients, results):
+        if not ok:
+            _discard_client(ws)
+            with contextlib.suppress(Exception):
+                await asyncio.wait_for(ws.close(), timeout=1.0)
 
 
 def _device_fingerprint(dev: dict) -> str:
@@ -909,6 +932,13 @@ def _effective_tuning() -> dict:
     return defaults
 
 
+def _reset_translator_context(translator) -> None:
+    """Clear the translator's rolling context (after a language change)."""
+    reset = getattr(translator, "reset_context", None)
+    if callable(reset):
+        reset()
+
+
 def _apply_to_live_components(data: dict) -> list[str]:
     """Hot-swap settings into the running live components. Returns labels applied."""
     applied: list[str] = []
@@ -937,6 +967,7 @@ def _apply_to_live_components(data: dict) -> list[str]:
         transcriber.prompt = stt_anchor_prompt(code)
         if translator is not None:
             translator.source_language = _language_name(data["source_language"])
+            _reset_translator_context(translator)
         applied.append("source language")
 
     if translator is not None:
@@ -945,6 +976,8 @@ def _apply_to_live_components(data: dict) -> list[str]:
             applied.append("translation model")
         if "target_language" in data:
             translator.target_language = _language_name(data["target_language"])
+            # Old-language history would bias the new output language.
+            _reset_translator_context(translator)
             applied.append("target language")
         if "custom_vocabulary" in data:
             from src.config import load_config
@@ -1116,6 +1149,24 @@ async def api_apply(request):
             if key in filtered and str(filtered.get(key) or "") != str(prev.get(key) or ""):
                 restart_needed = True
                 restart_reason = "audio device changed"
+
+        # Streaming-mode changes can't be hot-swapped either: the socket
+        # engine is chosen and wired at session start.
+        if (
+            "stt_streaming" in filtered
+            and "stt_streaming" in prev
+            and bool(filtered["stt_streaming"]) != bool(prev["stt_streaming"])
+        ):
+            restart_needed = True
+            restart_reason = "streaming mode changed"
+        if state.live_streaming_active:
+            engine_keys = {"stt_provider"}
+            if str(prev.get("stt_provider") or "") == "deepgram":
+                engine_keys.add("deepgram_model")  # doubles as the live model
+            for key in engine_keys:
+                if key in filtered and str(filtered[key]) != str(prev.get(key) or ""):
+                    restart_needed = True
+                    restart_reason = "streaming engine changed"
 
         hot = {k: v for k, v in filtered.items() if k in _HOT_APPLY_KEYS}
         if hot:
@@ -1527,6 +1578,7 @@ async def _stop_live_pipeline(*, notify_clients: bool) -> None:
     state.live_translator = None
     state.live_synthesizer = None
     state.live_settings = {}
+    state.live_streaming_active = False
     state.live_tuning = {}
     state.stats["status"] = "stopped"
     state.stats["total_runtime"] = time.time() - state.start_time if state.start_time else 0.0
@@ -1749,6 +1801,7 @@ async def _run_live_pipeline():
             "elevenlabs_voice_id": saved.get("elevenlabs_voice_id"),
             "stt_model": config.transcription.model,
             "stt_provider": config.transcription.provider,
+            "stt_streaming": bool(getattr(config.transcription, "streaming", False)),
             "deepgram_model": config.transcription.deepgram_model,
             "elevenlabs_model": config.transcription.elevenlabs_model,
             "translation_model": config.translation.model,
@@ -1778,6 +1831,7 @@ async def _run_live_pipeline():
             and config.transcription.provider in STREAMING_PROVIDERS
             and bool(_provider_keys.get(config.transcription.provider))
         )
+        state.live_streaming_active = streaming_enabled
         stream_holder = {"stt": None}
         if streaming_enabled:
             def _raw_forward(pcm):
@@ -1807,6 +1861,24 @@ async def _run_live_pipeline():
         playback_active = True
         next_slot_ready = asyncio.Event()
 
+        # Coalesce this much TTS audio before the first device write of each
+        # utterance (~0.25s of 24 kHz mono int16). Streamed TTS chunks arrive
+        # at network pace; writing them straight through underruns the output
+        # stream on any hiccup, which is audible as mid-sentence stutter.
+        PREBUFFER_BYTES = 12000
+
+        async def _play_buffer(audio_bytes: bytes, seq: int):
+            play_tasks = [playback.play(audio_bytes)]
+            # Read from state so a live AES67 enable/disable/restart
+            # (via the tuning UI) takes effect mid-stream.
+            sender = state.live_aes67
+            if sender:
+                play_tasks.append(sender.play(audio_bytes))
+            try:
+                await asyncio.gather(*play_tasks)
+            except Exception as e:
+                logger.warning("Playback error (slot %d): %s", seq, e)
+
         async def _playback_worker():
             """Drains playback slots in order: slot 1, then 2, then 3..."""
             next_seq = 1
@@ -1825,6 +1897,8 @@ async def _run_live_pipeline():
                 slot = playback_slots[next_seq]
                 logger.info("Playback: starting slot %d", next_seq)
                 slot_started_at = time.monotonic()
+                pending = bytearray()  # jitter buffer until PREBUFFER_BYTES
+                prebuffering = True
 
                 # Drain all audio chunks from this slot
                 while True:
@@ -1832,6 +1906,8 @@ async def _run_live_pipeline():
                     remaining = slot_timeout_sec - elapsed
                     if remaining <= 0:
                         logger.warning("Playback slot %d timed out after %.1fs; skipping", next_seq, slot_timeout_sec)
+                        if pending:
+                            await _play_buffer(bytes(pending), next_seq)
                         await slot.put(None)
                         break
                     try:
@@ -1843,17 +1919,16 @@ async def _run_live_pipeline():
                             break
                         continue
                     if audio_bytes is None:  # End-of-slot marker
+                        if pending:
+                            await _play_buffer(bytes(pending), next_seq)
                         break
-                    play_tasks = [playback.play(audio_bytes)]
-                    # Read from state so a live AES67 enable/disable/restart
-                    # (via the tuning UI) takes effect mid-stream.
-                    sender = state.live_aes67
-                    if sender:
-                        play_tasks.append(sender.play(audio_bytes))
-                    try:
-                        await asyncio.gather(*play_tasks)
-                    except Exception as e:
-                        logger.warning("Playback error (slot %d): %s", next_seq, e)
+                    pending.extend(audio_bytes)
+                    if prebuffering and len(pending) < PREBUFFER_BYTES:
+                        continue
+                    prebuffering = False
+                    buffered = bytes(pending)
+                    pending.clear()
+                    await _play_buffer(buffered, next_seq)
 
                 # Slot done — advance to next
                 del playback_slots[next_seq]
@@ -2235,6 +2310,7 @@ async def _run_live_pipeline():
         state.live_translator = None
         state.live_synthesizer = None
         state.live_settings = {}
+        state.live_streaming_active = False
         state.live_tuning = {}
         state.live_running = False
         state.running = False
@@ -2421,8 +2497,40 @@ def create_app():
     return app
 
 
+def setup_logging() -> None:
+    """Log to the console and to ``logs/dashboard.log`` (rotating).
+
+    The file log is what lets a volunteer (or remote helper) diagnose a
+    problem after the service is over — the console scrollback is long gone
+    by then. Rotation keeps it to ~10 MB total.
+    """
+    from logging.handlers import RotatingFileHandler
+
+    fmt = logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s")
+    root = logging.getLogger()
+    root.setLevel(logging.INFO)
+
+    console = logging.StreamHandler()
+    console.setFormatter(fmt)
+    root.addHandler(console)
+
+    try:
+        log_dir = PROJECT_ROOT / "logs"
+        log_dir.mkdir(exist_ok=True)
+        file_handler = RotatingFileHandler(
+            log_dir / "dashboard.log",
+            maxBytes=2_000_000,
+            backupCount=4,
+            encoding="utf-8",
+        )
+        file_handler.setFormatter(fmt)
+        root.addHandler(file_handler)
+    except OSError as e:
+        root.warning("File logging disabled (%s)", e)
+
+
 if __name__ == "__main__":
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+    setup_logging()
     port = int(os.getenv("DASHBOARD_PORT", "8085"))
     host = os.getenv("DASHBOARD_HOST", "127.0.0.1")
 

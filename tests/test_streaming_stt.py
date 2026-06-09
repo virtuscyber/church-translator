@@ -231,6 +231,31 @@ async def test_openai_resamples_to_24k_and_sends_append():
     assert 22 <= len(out) <= 26  # halved sample count
 
 
+# ── Backpressure: the audio queue must stay bounded ──────────────────
+
+@pytest.mark.asyncio
+async def test_feed_drops_oldest_when_socket_is_down():
+    from src.streaming_stt import _MAX_QUEUED_FRAMES
+
+    t, _, _ = _make()
+    t._running = True  # socket "connecting" — nothing drains the queue
+
+    for i in range(_MAX_QUEUED_FRAMES + 50):
+        t.feed(i.to_bytes(4, "little"))
+
+    assert t._audio_q.qsize() == _MAX_QUEUED_FRAMES
+    # The oldest frames were dropped; the newest survive.
+    first = t._audio_q.get_nowait()
+    assert int.from_bytes(first, "little") == 50
+
+
+@pytest.mark.asyncio
+async def test_feed_ignored_when_stopped():
+    t, _, _ = _make()
+    t.feed(b"audio")
+    assert t._audio_q.qsize() == 0
+
+
 # ── Factory ───────────────────────────────────────────────────────────
 
 def test_factory_builds_each_engine():

@@ -25,8 +25,7 @@ import logging
 from typing import Callable, Optional
 from urllib.parse import urlencode
 
-import numpy as np
-
+from .audio_resample import StreamingResampler
 from .hallucination import sanitize_transcript
 
 logger = logging.getLogger(__name__)
@@ -34,6 +33,15 @@ logger = logging.getLogger(__name__)
 # Send a keepalive if no audio has been forwarded for this long, so the socket
 # isn't closed during silence.
 _KEEPALIVE_IDLE_SEC = 5.0
+
+# Cap the audio backlog (~5.5s of 48 kHz capture in 21 ms frames). While the
+# socket is down/reconnecting the capture callback keeps feeding; without a cap
+# the queue grows unbounded and then floods the provider with stale audio.
+_MAX_QUEUED_FRAMES = 256
+
+# Pause before reconnecting after a server-side clean close, so a server that
+# accepts and immediately closes doesn't spin us in a tight reconnect loop.
+_RECONNECT_PAUSE_SEC = 1.0
 
 
 class StreamingTranscriber:
@@ -60,15 +68,25 @@ class StreamingTranscriber:
         self.max_reconnects = max_reconnects
 
         self._audio_q: asyncio.Queue[bytes] = asyncio.Queue()
+        self._resampler: Optional[StreamingResampler] = None
         self._running = False
         self.last_error: Optional[str] = None
 
     # ── Public API ────────────────────────────────────────────────────
 
     def feed(self, pcm: bytes) -> None:
-        """Queue an int16-LE mono PCM frame (non-blocking; dropped if stopped)."""
-        if self._running and pcm:
-            self._audio_q.put_nowait(pcm)
+        """Queue an int16-LE mono PCM frame (non-blocking; dropped if stopped).
+
+        The backlog is bounded: if the socket is down long enough for the queue
+        to fill, the oldest frames are dropped — stale audio is useless to the
+        provider, and an unbounded queue would grow for the whole outage.
+        """
+        if not (self._running and pcm):
+            return
+        while self._audio_q.qsize() >= _MAX_QUEUED_FRAMES:
+            with contextlib.suppress(asyncio.QueueEmpty):
+                self._audio_q.get_nowait()
+        self._audio_q.put_nowait(pcm)
 
     async def run(self) -> None:
         """Own the socket for the session, reconnecting on unexpected drops."""
@@ -78,6 +96,8 @@ class StreamingTranscriber:
             try:
                 await self._session_once()
                 attempts = 0  # clean close resets the backoff
+                if self._running:
+                    await asyncio.sleep(_RECONNECT_PAUSE_SEC)
             except asyncio.CancelledError:
                 raise
             except Exception as e:  # noqa: BLE001 - surface + reconnect
@@ -109,19 +129,16 @@ class StreamingTranscriber:
             self.on_final(text)
 
     def _resample(self, pcm: bytes, out_rate: int) -> bytes:
-        """Resample int16-LE mono PCM from ``in_sample_rate`` to ``out_rate``."""
+        """Resample int16-LE mono PCM from ``in_sample_rate`` to ``out_rate``.
+
+        Uses a stateful anti-aliased resampler: aliasing from a naive
+        decimation lands squarely in the speech band and degrades recognition.
+        """
         if out_rate == self.in_sample_rate or not pcm:
             return pcm
-        a = np.frombuffer(pcm, dtype="<i2")
-        if a.size == 0:
-            return b""
-        n_out = max(1, int(round(a.size * out_rate / self.in_sample_rate)))
-        idx = np.linspace(0, a.size - 1, n_out)
-        lo = np.floor(idx).astype(np.int64)
-        hi = np.minimum(lo + 1, a.size - 1)
-        frac = idx - lo
-        out = (a[lo] * (1.0 - frac) + a[hi] * frac).astype("<i2")
-        return out.tobytes()
+        if self._resampler is None or self._resampler.dst_rate != out_rate:
+            self._resampler = StreamingResampler(self.in_sample_rate, out_rate)
+        return self._resampler.process_int16_bytes(pcm)
 
     # ── Socket loop (shared) ──────────────────────────────────────────
 

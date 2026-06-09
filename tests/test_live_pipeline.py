@@ -215,6 +215,53 @@ async def test_live_pipeline_streaming_end_to_end(monkeypatch):
     assert server.state.transcript[-1]["translated"] == "Hello"
 
 
+# ── Playback jitter buffer ────────────────────────────────────────────
+
+class DribblingSynth:
+    """Streams the utterance as several small TTS chunks (like a real API)."""
+
+    def __init__(self, **kwargs):
+        self.last_error = None
+
+    async def synthesize_stream(self, text):
+        for piece in (b"AAA", b"BBB", b"CCC"):
+            yield piece
+
+
+@pytest.mark.asyncio
+async def test_playback_coalesces_streamed_tts_chunks(monkeypatch):
+    """Sub-prebuffer TTS chunks must reach the device as one contiguous write,
+    not as dribbled 3-byte writes that would underrun the output stream."""
+    import src.synthesizer
+    import src.audio_playback
+    from dashboard import server
+
+    events = _install_fakes(monkeypatch)
+    monkeypatch.setattr(src.synthesizer, "Synthesizer", DribblingSynth)
+
+    played = []
+
+    class RecordingPlayback:
+        def __init__(self, **kwargs):
+            pass
+        async def play(self, audio):
+            played.append(audio)
+        async def close(self):
+            pass
+
+    monkeypatch.setattr(src.audio_playback, "AudioPlayback", RecordingPlayback)
+    monkeypatch.delenv("DEEPGRAM_API_KEY", raising=False)
+    monkeypatch.delenv("ELEVENLABS_API_KEY", raising=False)
+
+    await _drive_pipeline(server, events, want_type="translation")
+    # Give the playback worker a beat to drain the slot.
+    deadline = time.monotonic() + 2.0
+    while not played and time.monotonic() < deadline:
+        await asyncio.sleep(0.02)
+
+    assert played == [b"AAABBBCCC"]
+
+
 # ── Error surfacing through the pipeline ──────────────────────────────
 
 class FailingTranscriber:

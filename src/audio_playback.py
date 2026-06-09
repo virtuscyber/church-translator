@@ -15,6 +15,8 @@ from typing import Optional
 
 import numpy as np
 
+from .audio_resample import resample_f32
+
 logger = logging.getLogger(__name__)
 
 
@@ -93,15 +95,6 @@ class AudioPlayback:
             self.device, device_sr,
         )
 
-    def _resample(self, audio: np.ndarray, from_sr: int, to_sr: int) -> np.ndarray:
-        """Simple linear-interpolation resample (good enough for speech)."""
-        if from_sr == to_sr:
-            return audio
-        ratio = to_sr / from_sr
-        new_len = int(len(audio) * ratio)
-        indices = np.linspace(0, len(audio) - 1, new_len)
-        return np.interp(indices, np.arange(len(audio)), audio).astype(np.float32)
-
     async def play(self, pcm_bytes: bytes, sample_rate: Optional[int] = None):
         """Play raw PCM int16 audio bytes through the persistent stream.
 
@@ -121,22 +114,37 @@ class AudioPlayback:
             logger.error("Playback failed: %s", e)
 
     def _play_sync(self, pcm_bytes: bytes, src_rate: int):
-        """Synchronous write into the persistent output stream."""
+        """Synchronous write into the persistent output stream.
+
+        If the write fails (USB speaker unplugged/re-enumerated, device error),
+        the stream is reopened once and the write retried — the output-side
+        counterpart of the mic watchdog. A second failure propagates to play(),
+        which logs it.
+        """
         audio = np.frombuffer(pcm_bytes, dtype=np.int16).astype(np.float32) / 32767.0
 
         if len(audio) == 0:
             return
 
         with self._lock:
-            self._ensure_stream()
+            try:
+                self._write_locked(audio, src_rate)
+            except Exception as e:
+                logger.warning("Output stream write failed (%s) — reopening device and retrying", e)
+                self._close_locked()
+                self._write_locked(audio, src_rate)
+                logger.info("Output stream recovered after reopen")
 
-            # Resample if device rate differs from source rate
-            if self._stream_sr != src_rate:
-                audio = self._resample(audio, src_rate, self._stream_sr)
+    def _write_locked(self, audio: np.ndarray, src_rate: int):
+        """Open the stream if needed, resample to its rate, and write."""
+        self._ensure_stream()
 
-            # Write the full buffer — OutputStream.write() blocks until
-            # all samples are accepted, giving us back-pressure flow control.
-            self._stream.write(audio.reshape(-1, 1) if self.channels == 1 else audio)
+        if self._stream_sr != src_rate:
+            audio = resample_f32(audio, src_rate, self._stream_sr)
+
+        # Write the full buffer — OutputStream.write() blocks until
+        # all samples are accepted, giving us back-pressure flow control.
+        self._stream.write(audio.reshape(-1, 1) if self.channels == 1 else audio)
 
     async def close(self):
         """Close the persistent output stream (call when pipeline stops)."""
@@ -145,12 +153,15 @@ class AudioPlayback:
 
     def _close_sync(self):
         with self._lock:
-            if self._stream is not None:
-                try:
-                    self._stream.stop()
-                    self._stream.close()
-                except Exception as e:
-                    logger.warning("Error closing output stream: %s", e)
-                self._stream = None
-                self._stream_sr = 0
-                logger.info("Output stream closed")
+            self._close_locked()
+
+    def _close_locked(self):
+        if self._stream is not None:
+            try:
+                self._stream.stop()
+                self._stream.close()
+            except Exception as e:
+                logger.warning("Error closing output stream: %s", e)
+            self._stream = None
+            self._stream_sr = 0
+            logger.info("Output stream closed")

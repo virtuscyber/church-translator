@@ -370,6 +370,57 @@ async def test_websocket_rejects_invalid_json_without_crashing(monkeypatch):
     assert server.state.connected_clients == []
 
 
+# ── Broadcast isolation ───────────────────────────────────────────────
+
+@pytest.mark.asyncio
+async def test_broadcast_drops_stalled_client_without_blocking(monkeypatch):
+    """One hung WebSocket client must not stall the pipeline's broadcasts —
+    it gets dropped while healthy clients still receive the message."""
+    from dashboard import server
+
+    monkeypatch.setattr(server, "_BROADCAST_SEND_TIMEOUT", 0.05)
+
+    class HealthyWS:
+        def __init__(self):
+            self.received = []
+        async def send_str(self, data):
+            self.received.append(data)
+        async def close(self):
+            pass
+
+    class StalledWS:
+        async def send_str(self, data):
+            await asyncio.sleep(3600)  # dead TCP session
+        async def close(self):
+            pass
+
+    healthy, stalled = HealthyWS(), StalledWS()
+    server.state.connected_clients = [stalled, healthy]
+
+    await asyncio.wait_for(server.broadcast({"type": "info", "message": "hi"}), timeout=1.0)
+
+    assert len(healthy.received) == 1
+    assert server.state.connected_clients == [healthy]
+
+
+@pytest.mark.asyncio
+async def test_broadcast_drops_client_on_send_error():
+    from dashboard import server
+
+    class BrokenWS:
+        async def send_str(self, data):
+            raise ConnectionResetError("gone")
+        async def close(self):
+            raise RuntimeError("also broken")  # must be tolerated
+
+    broken = BrokenWS()
+    server.state.connected_clients = [broken]
+
+    await server.broadcast({"type": "info", "message": "hi"})
+
+    assert server.state.connected_clients == []
+
+
 # ── Live-apply endpoint ───────────────────────────────────────────────
 
 class _FakeTranscriber:
@@ -455,6 +506,76 @@ async def test_apply_flags_restart_on_device_change(monkeypatch):
 
     assert payload["restart_needed"] is True
     assert "device" in payload["restart_reason"]
+
+
+@pytest.mark.asyncio
+async def test_apply_flags_restart_on_streaming_toggle(monkeypatch):
+    from dashboard import server
+
+    server.state.live_running = True
+    server.state.live_transcriber = _FakeTranscriber()
+    server.state.live_translator = _FakeTranslator()
+    server.state.live_synthesizer = _FakeSynth()
+    server.state.live_settings = {"stt_streaming": True, "stt_provider": "deepgram"}
+    monkeypatch.setattr(server, "broadcast", lambda msg: asyncio.sleep(0))
+
+    response = await server.api_apply(
+        DummyRequest("/api/apply", data={"stt_streaming": False})
+    )
+    payload = decode_json_response(response)
+
+    assert payload["restart_needed"] is True
+    assert "streaming" in payload["restart_reason"]
+
+
+@pytest.mark.asyncio
+async def test_apply_flags_restart_on_engine_change_while_streaming(monkeypatch):
+    from dashboard import server
+
+    server.state.live_running = True
+    server.state.live_streaming_active = True
+    server.state.live_transcriber = _FakeTranscriber()
+    server.state.live_translator = _FakeTranslator()
+    server.state.live_synthesizer = _FakeSynth()
+    server.state.live_settings = {
+        "stt_streaming": True, "stt_provider": "deepgram", "deepgram_model": "nova-3",
+    }
+    monkeypatch.setattr(server, "broadcast", lambda msg: asyncio.sleep(0))
+
+    # Changing the provider mid-streaming-session swaps the socket engine.
+    response = await server.api_apply(
+        DummyRequest("/api/apply", data={"stt_provider": "elevenlabs"})
+    )
+    assert decode_json_response(response)["restart_needed"] is True
+
+    # So does changing the model the live Deepgram socket was opened with.
+    server.state.live_settings["stt_provider"] = "deepgram"
+    response = await server.api_apply(
+        DummyRequest("/api/apply", data={"deepgram_model": "nova-2"})
+    )
+    assert decode_json_response(response)["restart_needed"] is True
+
+
+@pytest.mark.asyncio
+async def test_apply_does_not_restart_for_provider_change_in_chunked_mode(monkeypatch):
+    from dashboard import server
+
+    server.state.live_running = True
+    server.state.live_streaming_active = False  # chunked session
+    server.state.live_transcriber = _FakeTranscriber()
+    server.state.live_translator = _FakeTranslator()
+    server.state.live_synthesizer = _FakeSynth()
+    server.state.live_settings = {"stt_streaming": False, "stt_provider": "openai"}
+    monkeypatch.setattr(server, "broadcast", lambda msg: asyncio.sleep(0))
+
+    response = await server.api_apply(
+        DummyRequest("/api/apply", data={"stt_provider": "elevenlabs"})
+    )
+    payload = decode_json_response(response)
+
+    # Chunked-mode providers hot-swap per request — no restart needed.
+    assert payload["restart_needed"] is False
+    assert server.state.live_transcriber.provider == "elevenlabs"
 
 
 # ── Transcript export ─────────────────────────────────────────────────

@@ -16,6 +16,8 @@ from typing import Optional
 
 import numpy as np
 
+from .audio_resample import resample_f32
+
 logger = logging.getLogger(__name__)
 
 # AES67 constants
@@ -33,6 +35,9 @@ _RTP_HEADER_SIZE = 12
 # SAP constants
 _SAP_VERSION = 1
 _SAP_INTERVAL_SEC = 30
+
+# Cap the queued-audio backlog at 30s of L24/48kHz (3 bytes × 48000/s).
+_MAX_BUFFER_BYTES = 30 * 3 * _AES67_SAMPLE_RATE
 
 
 def _build_sdp(
@@ -79,45 +84,6 @@ def _build_sap_packet(
     )
     payload_type = b"application/sdp\x00"
     return header + payload_type + sdp.encode("utf-8")
-
-
-def _resample_24k_to_48k(pcm_int16: np.ndarray) -> np.ndarray:
-    """Resample 24kHz int16 audio to 48kHz using linear interpolation.
-
-    For speech content, linear interpolation is sufficient and avoids
-    the scipy dependency. The 2x ratio makes this straightforward.
-    """
-    n = len(pcm_int16)
-    if n == 0:
-        return np.array([], dtype=np.float64)
-    # 2x upsampling: insert interpolated sample between each pair
-    out = np.empty(n * 2, dtype=np.float64)
-    samples = pcm_int16.astype(np.float64)
-    out[0::2] = samples
-    out[1::2] = np.empty(n, dtype=np.float64)
-    # Interpolate: average of current and next sample
-    out[1:-1:2] = (samples[:-1] + samples[1:]) / 2.0
-    # Last interpolated sample: repeat last value
-    out[-1] = samples[-1]
-    return out
-
-
-def _float_to_l24(samples: np.ndarray) -> bytes:
-    """Convert float64 samples (int16 range) to L24 big-endian bytes.
-
-    Input samples are in int16 range (-32768..32767). L24 range is -8388608..8388607.
-    We scale by 256 (shift left 8 bits) to fill the 24-bit range.
-    """
-    # Scale from int16 range to int24 range
-    scaled = np.clip(samples * 256.0, -8388608, 8388607).astype(np.int32)
-    # Pack each sample as 3 bytes big-endian
-    result = bytearray(len(scaled) * 3)
-    for i, s in enumerate(scaled):
-        val = int(s) & 0xFFFFFF  # Mask to 24-bit unsigned representation
-        result[i * 3] = (val >> 16) & 0xFF
-        result[i * 3 + 1] = (val >> 8) & 0xFF
-        result[i * 3 + 2] = val & 0xFF
-    return bytes(result)
 
 
 def _float_to_l24_fast(samples: np.ndarray) -> bytes:
@@ -283,21 +249,10 @@ class AES67Sender:
         if len(audio_int16) == 0:
             return
 
-        # Resample to 48kHz if needed
-        if src_rate == 24000:
-            audio_48k = _resample_24k_to_48k(audio_int16)
-        elif src_rate == _AES67_SAMPLE_RATE:
-            audio_48k = audio_int16.astype(np.float64)
-        else:
-            # Generic resampling via linear interpolation
-            ratio = _AES67_SAMPLE_RATE / src_rate
-            n_out = int(len(audio_int16) * ratio)
-            indices = np.arange(n_out) / ratio
-            idx_floor = np.floor(indices).astype(int)
-            idx_ceil = np.minimum(idx_floor + 1, len(audio_int16) - 1)
-            frac = indices - idx_floor
-            src = audio_int16.astype(np.float64)
-            audio_48k = src[idx_floor] * (1 - frac) + src[idx_ceil] * frac
+        # Resample to 48kHz if needed (anti-aliased; values stay in int16 range)
+        audio_48k = resample_f32(
+            audio_int16.astype(np.float32), src_rate, _AES67_SAMPLE_RATE
+        )
 
         # Convert to L24 bytes and append to buffer
         l24_bytes = _float_to_l24_fast(audio_48k)
@@ -310,6 +265,17 @@ class AES67Sender:
 
         with self._audio_lock:
             self._audio_buffer.extend(l24_bytes)
+            # Cap the backlog: if packets aren't draining (multicast send
+            # failing, NIC gone), keep the freshest audio instead of growing
+            # without bound for the rest of the service.
+            overflow = len(self._audio_buffer) - _MAX_BUFFER_BYTES
+            if overflow > 0:
+                del self._audio_buffer[:overflow]
+                logger.warning(
+                    "AES67 buffer overflow — dropped %.1fs of queued audio "
+                    "(is the stream draining?)",
+                    overflow / (3 * _AES67_SAMPLE_RATE),
+                )
 
     def _continuous_stream_loop(self):
         """Send RTP packets continuously at 1ms intervals (runs in daemon thread).
@@ -342,6 +308,7 @@ class AES67Sender:
         packets_sent = 0            # packets emitted since t_start (drives pacing)
         total_packets = 0           # lifetime counter (logging only)
         prev_was_silence = True     # so the first audio packet gets the marker bit
+        send_failures = 0           # consecutive sendto() errors (throttles logging)
 
         logger.info("AES67 continuous stream started (1ms cadence, drift-free burst pacing)")
 
@@ -386,13 +353,23 @@ class AES67Sender:
                 prev_was_silence = is_silence
 
                 header = self._build_rtp_header(marker=marker)
-                try:
-                    self._rtp_sock.sendto(header + payload, (self.multicast_addr, self.port))
-                except OSError as e:
-                    if self._running:
-                        logger.error("RTP send failed: %s", e)
+                sock = self._rtp_sock  # snapshot — stop() clears it from another thread
+                if sock is None:
                     logger.info("AES67 continuous stream stopped (sent %d packets)", total_packets)
                     return
+                try:
+                    sock.sendto(header + payload, (self.multicast_addr, self.port))
+                    send_failures = 0
+                except OSError as e:
+                    if not self._running:
+                        logger.info("AES67 continuous stream stopped (sent %d packets)", total_packets)
+                        return
+                    # Transient network errors (interface flap, route change)
+                    # must not kill the sender for the rest of the service —
+                    # keep pacing and retrying, with throttled logging.
+                    send_failures += 1
+                    if send_failures == 1 or send_failures % 1000 == 0:
+                        logger.error("RTP send failed (×%d): %s", send_failures, e)
 
                 self._rtp_seq = (self._rtp_seq + 1) & 0xFFFF
                 self._rtp_ts = (self._rtp_ts + _SAMPLES_PER_PACKET) & 0xFFFFFFFF

@@ -2,12 +2,16 @@
 
 Supports both batch mode (returns all audio at once) and streaming mode
 (yields audio chunks as they arrive from the API for lower latency).
+
+ElevenLabs is called over its REST streaming endpoint directly (no SDK), which
+lets us pass ``previous_text`` — the previously spoken sentence — so prosody
+carries across utterances instead of every chunk restarting cold. Both
+providers return raw PCM mono 16-bit at 24 kHz.
 """
 
 from __future__ import annotations
 
 import asyncio
-import io
 import logging
 from typing import AsyncIterator, Optional
 
@@ -16,6 +20,12 @@ logger = logging.getLogger(__name__)
 # Minimum bytes to yield in streaming mode — small enough for low latency,
 # large enough to avoid excessive overhead. ~50ms of PCM 24kHz mono 16-bit.
 _STREAM_MIN_CHUNK_BYTES = 2400  # 50ms at 24kHz × 2 bytes
+
+# How much trailing text to send as ElevenLabs prosody context. Longer adds
+# request weight without improving continuity.
+_PREVIOUS_TEXT_MAX_CHARS = 500
+
+_ELEVENLABS_TTS_URL = "https://api.elevenlabs.io/v1/text-to-speech/{voice_id}/stream"
 
 
 class Synthesizer:
@@ -54,15 +64,17 @@ class Synthesizer:
         self.max_retries = max_retries
         # Error string when synthesis ultimately fails, else None.
         self.last_error: Optional[str] = None
+        # Last successfully synthesized text — ElevenLabs prosody context.
+        self._previous_text: str = ""
 
-    # ── Batch mode (original interface, unchanged) ────────────────────
+    # ── Batch mode ─────────────────────────────────────────────────────
 
     async def synthesize(self, text: str) -> Optional[bytes]:
         """Convert text to audio bytes (all at once).
-        
+
         Args:
             text: Text to speak.
-            
+
         Returns:
             Complete audio bytes (PCM), or None on failure.
         """
@@ -97,18 +109,18 @@ class Synthesizer:
         self.last_error = str(last_exc) if last_exc else "synthesis failed"
         return None
 
-    # ── Streaming mode (new — yields chunks as they arrive) ──────────
+    # ── Streaming mode (yields chunks as they arrive) ──────────────────
 
     async def synthesize_stream(self, text: str) -> AsyncIterator[bytes]:
         """Stream audio chunks as they arrive from the TTS API.
-        
+
         Yields PCM audio bytes in chunks (~50-200ms each) as they're
         received from the provider. First chunk arrives much sooner
         than waiting for the full synthesis to complete.
-        
+
         Args:
             text: Text to speak.
-            
+
         Yields:
             PCM audio byte chunks.
         """
@@ -136,93 +148,80 @@ class Synthesizer:
                     return
             self.last_error = str(e)
 
-    async def _stream_elevenlabs(self, text: str) -> AsyncIterator[bytes]:
-        """Stream PCM chunks from ElevenLabs API."""
-        from elevenlabs import AsyncElevenLabs
+    # ── ElevenLabs (REST streaming endpoint) ──────────────────────────
 
-        client = AsyncElevenLabs(api_key=self.elevenlabs_api_key, timeout=self.timeout)
-
-        audio_iter = client.text_to_speech.convert(
-            voice_id=self.el_voice_id,
-            text=text,
-            model_id=self.el_model,
-            voice_settings={
+    def _elevenlabs_payload(self, text: str) -> dict:
+        payload = {
+            "text": text,
+            "model_id": self.el_model,
+            "voice_settings": {
                 "stability": self.el_stability,
                 "similarity_boost": self.el_similarity,
                 "speed": self.speed,
             },
-            output_format="pcm_24000",
-        )
+        }
+        # Prosody continuity: tell the model what was just spoken so this
+        # utterance's intonation continues the sermon instead of restarting.
+        if self._previous_text:
+            payload["previous_text"] = self._previous_text[-_PREVIOUS_TEXT_MAX_CHARS:]
+        return payload
 
-        buffer = bytearray()
+    async def _stream_elevenlabs(self, text: str) -> AsyncIterator[bytes]:
+        """Stream PCM chunks from the ElevenLabs REST API. Raises on error."""
+        import aiohttp
+
+        url = _ELEVENLABS_TTS_URL.format(voice_id=self.el_voice_id)
+        timeout = aiohttp.ClientTimeout(total=self.timeout)
         first_chunk = True
 
-        if hasattr(audio_iter, '__aiter__'):
-            async for chunk in audio_iter:
-                buffer.extend(chunk)
-                if len(buffer) >= _STREAM_MIN_CHUNK_BYTES:
-                    if first_chunk:
-                        logger.info("TTS stream: first chunk ready (%d bytes)", len(buffer))
-                        first_chunk = False
-                    yield bytes(buffer)
-                    buffer.clear()
-        elif hasattr(audio_iter, '__iter__'):
-            for chunk in audio_iter:
-                buffer.extend(chunk)
-                if len(buffer) >= _STREAM_MIN_CHUNK_BYTES:
-                    if first_chunk:
-                        logger.info("TTS stream: first chunk ready (%d bytes)", len(buffer))
-                        first_chunk = False
-                    yield bytes(buffer)
-                    buffer.clear()
-        else:
-            # Coroutine — await it first
-            result = await audio_iter
-            if hasattr(result, '__aiter__'):
-                async for chunk in result:
-                    buffer.extend(chunk)
-                    if len(buffer) >= _STREAM_MIN_CHUNK_BYTES:
-                        if first_chunk:
-                            logger.info("TTS stream: first chunk ready (%d bytes)", len(buffer))
-                            first_chunk = False
-                        yield bytes(buffer)
-                        buffer.clear()
-            elif hasattr(result, '__iter__'):
-                for chunk in result:
-                    buffer.extend(chunk)
-                    if len(buffer) >= _STREAM_MIN_CHUNK_BYTES:
-                        if first_chunk:
-                            logger.info("TTS stream: first chunk ready (%d bytes)", len(buffer))
-                            first_chunk = False
-                        yield bytes(buffer)
-                        buffer.clear()
-            else:
-                buffer.extend(result)
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.post(
+                url,
+                params={"output_format": "pcm_24000"},
+                json=self._elevenlabs_payload(text),
+                headers={"xi-api-key": self.elevenlabs_api_key},
+            ) as resp:
+                if resp.status != 200:
+                    body = await resp.text()
+                    raise RuntimeError(f"ElevenLabs TTS HTTP {resp.status}: {body[:200]}")
 
-        # Flush remaining
-        if buffer:
-            yield bytes(buffer)
+                buffer = bytearray()
+                async for chunk in resp.content.iter_chunked(_STREAM_MIN_CHUNK_BYTES):
+                    buffer.extend(chunk)
+                    if len(buffer) >= _STREAM_MIN_CHUNK_BYTES:
+                        if first_chunk:
+                            logger.info("TTS stream: first chunk ready (%d bytes)", len(buffer))
+                            first_chunk = False
+                        yield bytes(buffer)
+                        buffer.clear()
+                if buffer:
+                    yield bytes(buffer)
+
+        self._previous_text = text
+
+    async def _synthesize_elevenlabs(self, text: str) -> bytes:
+        """Synthesize using ElevenLabs (batch — collects the stream)."""
+        chunks = [chunk async for chunk in self._stream_elevenlabs(text)]
+        return b"".join(chunks)
+
+    # ── OpenAI ─────────────────────────────────────────────────────────
 
     async def _stream_openai(self, text: str) -> AsyncIterator[bytes]:
-        """Stream PCM chunks from OpenAI TTS API."""
+        """Stream PCM chunks from the OpenAI TTS API as they're generated."""
         from openai import AsyncOpenAI
 
         client = AsyncOpenAI(api_key=self.openai_api_key, timeout=self.timeout, max_retries=self.max_retries)
 
-        # Use streaming response
-        response = await client.audio.speech.create(
+        async with client.audio.speech.with_streaming_response.create(
             model=self.oai_model,
             voice=self.oai_voice,
             input=text,
             response_format="pcm",
             speed=self.speed,
-        )
-
-        # OpenAI returns the full response — check if we can stream it
-        if hasattr(response, 'iter_bytes'):
+        ) as response:
             buffer = bytearray()
             first_chunk = True
-            for chunk in response.iter_bytes(chunk_size=_STREAM_MIN_CHUNK_BYTES):
+            async for chunk in response.iter_bytes(chunk_size=_STREAM_MIN_CHUNK_BYTES):
                 buffer.extend(chunk)
                 if len(buffer) >= _STREAM_MIN_CHUNK_BYTES:
                     if first_chunk:
@@ -232,62 +231,6 @@ class Synthesizer:
                     buffer.clear()
             if buffer:
                 yield bytes(buffer)
-        elif hasattr(response, 'aiter_bytes'):
-            buffer = bytearray()
-            first_chunk = True
-            async for chunk in response.aiter_bytes(chunk_size=_STREAM_MIN_CHUNK_BYTES):
-                buffer.extend(chunk)
-                if len(buffer) >= _STREAM_MIN_CHUNK_BYTES:
-                    if first_chunk:
-                        logger.info("TTS stream (OpenAI): first chunk ready (%d bytes)", len(buffer))
-                        first_chunk = False
-                    yield bytes(buffer)
-                    buffer.clear()
-            if buffer:
-                yield bytes(buffer)
-        else:
-            # Fallback — return full content as one chunk
-            yield response.content
-
-    # ── Batch implementations (unchanged) ─────────────────────────────
-
-    async def _synthesize_elevenlabs(self, text: str) -> bytes:
-        """Synthesize using ElevenLabs API (batch — collects all chunks)."""
-        from elevenlabs import AsyncElevenLabs
-
-        client = AsyncElevenLabs(api_key=self.elevenlabs_api_key, timeout=self.timeout)
-
-        audio_iter = client.text_to_speech.convert(
-            voice_id=self.el_voice_id,
-            text=text,
-            model_id=self.el_model,
-            voice_settings={
-                "stability": self.el_stability,
-                "similarity_boost": self.el_similarity,
-                "speed": self.speed,
-            },
-            output_format="pcm_24000",
-        )
-
-        chunks = []
-        if hasattr(audio_iter, '__aiter__'):
-            async for chunk in audio_iter:
-                chunks.append(chunk)
-        elif hasattr(audio_iter, '__iter__'):
-            for chunk in audio_iter:
-                chunks.append(chunk)
-        else:
-            result = await audio_iter
-            if hasattr(result, '__aiter__'):
-                async for chunk in result:
-                    chunks.append(chunk)
-            elif hasattr(result, '__iter__'):
-                for chunk in result:
-                    chunks.append(chunk)
-            else:
-                chunks.append(result)
-        
-        return b"".join(chunks)
 
     async def _synthesize_openai(self, text: str) -> bytes:
         """Synthesize using OpenAI TTS API (batch)."""
